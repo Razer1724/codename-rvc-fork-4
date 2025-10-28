@@ -38,8 +38,6 @@ import auraloss
 now_dir = os.getcwd()
 sys.path.append(os.path.join(now_dir))
 
-import rvc.lib.zluda # Zluda hijack
-
 from utils import (
     HParams,
     plot_spectrogram_to_numpy,

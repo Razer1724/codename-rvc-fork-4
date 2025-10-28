@@ -15,9 +15,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 
-# Zluda hijack
-import rvc.lib.zluda
-
 # Import Tabs
 from tabs.inference.inference import inference_tab
 from tabs.train.train import train_tab

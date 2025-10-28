@@ -13,9 +13,6 @@ import json
 now_dir = os.getcwd()
 sys.path.append(os.path.join(now_dir))
 
-# Zluda hijack
-import rvc.lib.zluda
-
 from rvc.lib.utils import load_audio_16k, load_embedding
 from rvc.train.extract.preparing_files import generate_config, generate_filelist
 from rvc.lib.predictors.f0 import CREPE, RMVPE, FCPE
