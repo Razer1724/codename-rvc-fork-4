@@ -4,7 +4,7 @@
 import torch
 from torch import nn, sin, pow
 from torch.nn import Parameter
-
+from torch.amp import autocast # guard
 
 class Snake(nn.Module):
     """
@@ -110,17 +110,23 @@ class SnakeBeta(nn.Module):
 
         self.no_div_by_zero = 0.000000001
 
+    @torch.amp.autocast('cuda', enabled=False)
     def forward(self, x):
         """
         Forward pass of the function.
         Applies the function to the input elementwise.
         SnakeBeta ∶= x + 1/b * sin^2 (xa)
         """
+        x = x.float()
         alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # Line up with x to [B, C, T]
         beta = self.beta.unsqueeze(0).unsqueeze(-1)
         if self.alpha_logscale:
             alpha = torch.exp(alpha)
             beta = torch.exp(beta)
+
+        alpha = alpha.to(x.dtype)
+        beta = beta.to(x.dtype)
+        
         x = x + (1.0 / (beta + self.no_div_by_zero)) * pow(sin(x * alpha), 2)
 
         return x

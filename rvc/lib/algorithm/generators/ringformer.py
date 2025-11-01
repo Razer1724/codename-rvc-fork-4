@@ -331,16 +331,10 @@ class RingFormerGenerator(nn.Module):
 
         x = x + (1 / self.alphas[i + 1]) * (torch.sin(self.alphas[i + 1] * x) ** 2)
 
-        x = self.conv_post(x)
+        with autocast(device_type="cuda", enabled=False):
+            x = x.to(torch.float32)
+            x = self.conv_post(x)
 
-        if x.dtype == torch.float16: # For FP16 training
-            with torch.amp.autocast(device_type="cuda", enabled=False):
-                # Upcast from fp16 to fp32 to avoid issues of some operators not supporting ComplexHalf
-                x = x.to(torch.float32)
-                spec = torch.exp(x[:, :self.post_n_fft // 2 + 1, :]).to(x.device)
-                phase = torch.sin(x[:, self.post_n_fft // 2 + 1:, :]).to(x.device)
-                out = self.stft.inverse(spec, phase).to(x.device)
-        else: # For FP32 and BF16 direct computation's safe
             spec = torch.exp(x[:, :self.post_n_fft // 2 + 1, :]).to(x.device)
             phase = torch.sin(x[:, self.post_n_fft // 2 + 1:, :]).to(x.device)
             out = self.stft.inverse(spec, phase).to(x.device)
