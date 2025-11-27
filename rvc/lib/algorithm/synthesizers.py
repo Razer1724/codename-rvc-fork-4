@@ -4,8 +4,10 @@ import random
 
 from rvc.lib.algorithm.commons import slice_segments, rand_slice_segments
 from rvc.lib.algorithm.normalizing_flows import ResidualCouplingBlock, ResidualCouplingTransformersBlock
-from rvc.lib.algorithm.encoders import PosteriorEncoder, TextEncoder
-from rvc.lib.algorithm.encoders_vits2 import TextEncoder_VITS2 as TextEncoder
+from rvc.lib.algorithm.encoders import PosteriorEncoder # Posterior encoder, shared between Vits1 and Vits2
+from rvc.lib.algorithm.encoders_vits2 import TextEncoder_VITS2
+from rvc.lib.algorithm.encoders import TextEncoder as TextEncoder_VITS1
+
 
 debug_shapes = False
 
@@ -61,7 +63,7 @@ class Synthesizer(torch.nn.Module):
         self.vits2_mode = vits2_mode
 
         if vits2_mode:
-            self.enc_p = TextEncoder(
+            self.enc_p = TextEncoder_VITS2(
                 inter_channels,
                 hidden_channels,
                 filter_channels,
@@ -74,7 +76,7 @@ class Synthesizer(torch.nn.Module):
                 gin_channels=gin_channels,
             )
         else:
-            self.enc_p = TextEncoder(
+            self.enc_p = TextEncoder_VITS1(
                 inter_channels,
                 hidden_channels,
                 filter_channels,
@@ -260,7 +262,6 @@ class Synthesizer(torch.nn.Module):
         g = self.emb_g(ds).unsqueeze(-1)
 
         if self.vits2_mode:
-            print("VITS2 MODE FOUND IN FORWARDDDDD")
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths, g=g)
         else:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
@@ -349,7 +350,6 @@ class Synthesizer(torch.nn.Module):
         g = self.emb_g(sid).unsqueeze(-1)
 
         if self.vits2_mode:
-            print("VITS2 MODE FOUND IN INFERENCEEEEE")
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths, g=g)
         else:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
