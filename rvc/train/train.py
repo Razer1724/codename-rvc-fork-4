@@ -62,6 +62,8 @@ from utils import (
 from losses import (
     discriminator_loss,
     generator_loss,
+    discriminator_loss_v2,
+    generator_loss_v2,
     feature_loss,
     kl_loss,
     kl_loss_clamped,
@@ -74,7 +76,6 @@ from mel_processing import (
 from rvc.train.process.extract_model import extract_model
 from rvc.lib.algorithm import commons
 from rvc.train.utils import replace_keys_in_dict
-
 
 # Parse command line arguments start region ===========================
 
@@ -152,9 +153,10 @@ randomized = True
 benchmark_mode = False
 enable_persistent_workers = True
 debug_shapes = False
-
 # EXPERIMENTAL
 c_stft = 21.0 # Seems close enough to multi-scale mel loss's magnitude, but needs more testing.
+tprls = False
+
 ##################################################################
 
 import logging
@@ -311,7 +313,14 @@ def get_d_model(config, vocoder, use_checkpointing):
             use_checkpointing=use_checkpointing,
             **dict(config.mrd)
         )
-    else: # For HiFi-GAN, RefineGan or MRF-HiFi-GAN
+    elif vocoder == "RefineGAN":
+        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined_RefineGan
+        # Trimmed MPD + MSD + MRD ( unified )
+        return MPD_MSD_MRD_Combined_RefineGan(
+            config.model.use_spectral_norm,
+            use_checkpointing=use_checkpointing
+        )
+    else: # For HiFi-GAN or MRF-HiFi-GAN
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_Combined
         # MPD + MSD ( unified ) - Original RVC Setup
         return MPD_MSD_Combined(
@@ -798,6 +807,12 @@ def run(
     # Cache for training with " cache " enabled
     cache = []
 
+    # Debug for tprls
+    if tprls:
+        print("------ GAN LOSS VARIANT: TPRLS ------")
+    else:
+        print("------ GAN LOSS VARIANT: LSGAN ------")
+
     for epoch in range(epoch_str, total_epoch_count + 1):
         training_loop(
             rank,
@@ -933,8 +948,8 @@ def training_loop(
         num_batches_in_epoch = 0
 
     avg_50_cache = {
-        "grad_norm_d_clipped_50": deque(maxlen=50),
-        "grad_norm_g_clipped_50": deque(maxlen=50),
+        "grad_norm_d_50": deque(maxlen=50),
+        "grad_norm_g_50": deque(maxlen=50),
         "loss_disc_50": deque(maxlen=50),
         "loss_adv_50": deque(maxlen=50),
         "loss_gen_total_50": deque(maxlen=50),
@@ -1005,7 +1020,10 @@ def training_loop(
 
             with autocast(device_type="cuda", enabled=False):
                 # Compute discriminator loss:
-                loss_disc = discriminator_loss(y_d_hat_r, y_d_hat_g)
+                if not tprls:
+                    loss_disc = discriminator_loss(y_d_hat_r, y_d_hat_g)
+                else:
+                    loss_disc = discriminator_loss_v2(y_d_hat_r, y_d_hat_g)
 
             # Discriminator backward and update:
             optim_d.zero_grad(set_to_none=True)
@@ -1013,13 +1031,11 @@ def training_loop(
                 gradscaler.scale(loss_disc).backward() # Scale and backward of the loss
                 gradscaler.unscale_(optim_d) # Unscale
                 scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=999999) # Grad clipping
-                grad_norm_d_clipped = commons.get_total_norm([p.grad for p in net_d.parameters() if p.grad is not None], norm_type=2.0, error_if_nonfinite=False) # Grad retrieval for logging
+                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=float("inf")) # Grad clipping
                 gradscaler.step(optim_d) # Optim step
             else:
                 loss_disc.backward() # Loss backward
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=999999) # Grad clipping
-                grad_norm_d_clipped = commons.get_total_norm([p.grad for p in net_d.parameters() if p.grad is not None], norm_type=2.0, error_if_nonfinite=True) # Grad retrieval for logging
+                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=float("inf")) # Grad clipping
                 optim_d.step() # Optim step
 
             # Run discriminator on generated output
@@ -1042,8 +1058,12 @@ def training_loop(
                 # Feature Matching loss
                 loss_fm = feature_loss(fmap_r, fmap_g)
      
-                # Generator loss 
-                loss_adv = generator_loss(y_d_hat_g)
+                # Generator loss
+                if not tprls:
+                    loss_adv = generator_loss(y_d_hat_g)
+                else:
+                    y_d_hat_r_detached = [i.detach() for i in y_d_hat_r]
+                    loss_adv = generator_loss_v2(y_d_hat_g, y_d_hat_r_detached)
 
                 # KL ( Kullback–Leibler divergence ) loss
                 if use_kl_annealing:
@@ -1072,15 +1092,13 @@ def training_loop(
             if train_dtype == torch.float16:
                 gradscaler.scale(loss_gen_total).backward() # Scale and backward of the loss
                 gradscaler.unscale_(optim_g) # Unscale
-                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=999999) # Grad clipping
-                grad_norm_g_clipped = commons.get_total_norm([p.grad for p in net_g.parameters() if p.grad is not None], norm_type=2.0, error_if_nonfinite=False) # Grad retrieval for logging
+                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=float("inf")) # Grad clipping
                 gradscaler.step(optim_g) # Optim step
                 gradscaler.update() # Scaler update, to prepare the scaling for the next iteration
                 skip_lr_sched = (scale > gradscaler.get_scale())
             else:
                 loss_gen_total.backward() # Loss backward
-                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=999999) # Grad clipping
-                grad_norm_g_clipped = commons.get_total_norm([p.grad for p in net_g.parameters() if p.grad is not None], norm_type=2.0, error_if_nonfinite=True) # Grad retrieval for logging
+                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=float("inf")) # Grad clipping
                 optim_g.step() # Optim step
                 skip_lr_sched = False
 
@@ -1103,8 +1121,8 @@ def training_loop(
 
             # queue for rolling losses / grads over 50 steps
             # Grads:
-            avg_50_cache["grad_norm_d_clipped_50"].append(grad_norm_d_clipped)
-            avg_50_cache["grad_norm_g_clipped_50"].append(grad_norm_g_clipped)
+            avg_50_cache["grad_norm_d_50"].append(grad_norm_d)
+            avg_50_cache["grad_norm_g_50"].append(grad_norm_g)
             # Losses:
             avg_50_cache["loss_disc_50"].append(loss_disc.detach())
             avg_50_cache["loss_adv_50"].append(loss_adv.detach())
@@ -1135,10 +1153,10 @@ def training_loop(
                 # logging rolling averages
                 scalar_dict_50.update({
                     # Grads:
-                    "grad_avg_50/norm_d_clipped_50": sum(avg_50_cache["grad_norm_d_clipped_50"])
-                    / len(avg_50_cache["grad_norm_d_clipped_50"]),
-                    "grad_avg_50/norm_g_clipped_50": sum(avg_50_cache["grad_norm_g_clipped_50"])
-                    / len(avg_50_cache["grad_norm_g_clipped_50"]),
+                    "grad_avg_50/norm_d_50": sum(avg_50_cache["grad_norm_d_50"])
+                    / len(avg_50_cache["grad_norm_d_50"]),
+                    "grad_avg_50/norm_g_50": sum(avg_50_cache["grad_norm_g_50"])
+                    / len(avg_50_cache["grad_norm_g_50"]),
                     # Losses:
                     "loss_avg_50/loss_disc_50": torch.mean(
                         torch.stack(list(avg_50_cache["loss_disc_50"]))).item(),

@@ -136,3 +136,100 @@ def kl_loss_clamped(z_p, logs_q, m_p, logs_p, z_mask):
     loss = torch.clamp(loss, min=0.0)
 
     return loss
+
+
+def discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
+    loss = 0
+    tau = 0.04
+    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
+        dr = dr.float()
+        dg = dg.float()
+
+        # Median centering
+        m_DG = torch.median((dr - dg))
+
+        # Relative difference
+        # We only penalize when the Real sample is NOT sufficiently better than Fake
+        # Condition: Real < Fake + Margin
+        diff = (dr - dg) - m_DG
+        mask = dr < (dg + m_DG)
+
+        # Calculate Squared Error on the masked (hard) examples
+        # We use empty-safe mean calculation
+        masked_diff = diff[mask]
+        if masked_diff.numel() > 0:
+            L_rel = torch.mean(masked_diff ** 2)
+        else:
+            L_rel = torch.tensor(0.0, device=dr.device)
+
+        # Truncate the loss (clamp)
+        loss += tau - F.relu(tau - L_rel)
+
+    return loss
+
+
+def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
+    loss = 0
+    tau = 0.04
+    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
+        dr = dr.float()
+        dg = dg.float()
+        
+        # Median centering (Fake - Real)
+        diff = dg - dr 
+        m_DG = torch.median(diff)
+
+        # Relative difference
+        # Generator wants Fake > Real. 
+        # We penalize when Fake is NOT sufficiently better than Real
+        # Condition: Fake < Real + Margin
+        rel_diff = diff - m_DG
+        mask = diff < m_DG
+
+        masked_diff = rel_diff[mask]
+        if masked_diff.numel() > 0:
+            L_rel = torch.mean(masked_diff ** 2)
+        else:
+            L_rel = torch.tensor(0.0, device=dg.device)
+
+        # Truncate the loss (clamp)
+        loss += tau - F.relu(tau - L_rel)
+
+    return loss
+
+def discriminator_loss_v2(disc_real_outputs, disc_generated_outputs):
+    """
+    Compute the discriminator loss for real and generated outputs.
+    """
+    loss = 0
+
+    # LSGAN Loss
+    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
+        r_loss = torch.mean((1 - dr.float()) ** 2)
+        g_loss = torch.mean(dg.float() ** 2)
+        loss += r_loss + g_loss
+
+    # TPRLS Loss
+    loss_rel = discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs)
+    loss += loss_rel
+
+    return loss
+
+
+def generator_loss_v2(disc_outputs, disc_real_outputs):
+    """
+    LSGAN Generator Loss + TPRLS
+    """
+    loss = 0
+
+    # Existing LSGAN Loss
+    for dg in disc_outputs:
+        l = torch.mean((1 - dg.float()) ** 2)
+        loss += l
+
+    # TPRLS Loss
+    loss_rel = generator_TPRLS_loss(disc_real_outputs, disc_outputs)
+    loss += loss_rel
+
+    return loss
+
