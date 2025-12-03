@@ -143,6 +143,12 @@ def tts_tab():
                 value="WAV",
                 interactive=True,
             )
+            seed = gr.Number(
+                label="Inference Seed",
+                info="Specify any seed to be used for inference or leave at '0' for random outputs. ( Classic RVC behavior. )",
+                value=0,
+                interactive=True,
+            )
             sid = gr.Dropdown(
                 label="Speaker ID",
                 info="Select the speaker ID to use for the conversion.",
@@ -229,15 +235,6 @@ def tts_tab():
                 label="Protect Voiceless Consonants",
                 info="Safeguard distinct consonants and breathing sounds to prevent electro-acoustic tearing and other artifacts. Pulling the parameter to its maximum value of 0.5 offers comprehensive protection. However, reducing this value might decrease the extent of protection while potentially mitigating the indexing effect.",
                 value=0.5,
-                interactive=True,
-            )
-            hop_length = gr.Slider(
-                minimum=1,
-                maximum=512,
-                step=1,
-                label="Hop Length",
-                info="Denotes the duration it takes for the system to transition to a significant pitch change. Smaller hop lengths require more time for inference but tend to yield higher pitch accuracy.",
-                value=128,
                 interactive=True,
             )
             f0_method = gr.Radio(
@@ -377,7 +374,6 @@ def tts_tab():
             index_rate,
             rms_mix_rate,
             protect,
-            hop_length,
             f0_method,
             output_tts_path,
             output_rvc_path,
@@ -393,6 +389,7 @@ def tts_tab():
             embedder_model,
             embedder_model_custom,
             sid,
+            seed,
         ],
         outputs=[vc_output1, vc_output2],
     )
