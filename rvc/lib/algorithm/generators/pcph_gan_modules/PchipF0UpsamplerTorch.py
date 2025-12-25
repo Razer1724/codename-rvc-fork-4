@@ -62,9 +62,6 @@ class PchipF0UpsamplerTorch(torch.nn.Module):
         self.scale_factor = scale_factor
 
     def forward(self, f0: torch.Tensor) -> torch.Tensor:
-
-        # print(f"PCHIP_UPSAMPLER:  Input dtype: {f0.dtype}")
-
         if f0.dim() != 3 or f0.size(1) != 1:
             raise ValueError(f"Expected (B,1,T), got {tuple(f0.shape)}")
         B, _, T = f0.shape

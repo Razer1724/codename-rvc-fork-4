@@ -1,3 +1,5 @@
 from .mpd_discriminator import MultiPeriodDiscriminator
 from .mrd_discriminator import MultiResolutionDiscriminator
 from .mssbcqt_discriminator import MultiScaleSubbandCQTDiscriminator
+from .msd_discriminator_rvc import MultiScaleDiscriminator_RVC
+from .mpd_discriminator_fast import FastMPD

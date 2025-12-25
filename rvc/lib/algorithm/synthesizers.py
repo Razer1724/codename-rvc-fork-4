@@ -41,21 +41,9 @@ class Synthesizer(torch.nn.Module):
         vits2_mode: bool = False,
         gen_istft_n_fft: int = 120,
         gen_istft_hop_size: int = 30,
-        convnext_channels: int = 32,
-        convnext_expansion_mult: int = 3,
-        convnext_kernel_sizes: List[int] = [13, 7],
-        num_blocks: int = 8,
-        n_fft: int = 960,
-        voc_hop: int = 480,
-        prior_type: str = "pcph",
-        convnext_drop_prob: int = 0.0,
-        use_layer_norm: bool = True,
-        use_logmag_phase: bool = False,
         **kwargs,
     ):
         super().__init__()
-        self.gen_istft_n_fft = gen_istft_n_fft
-        self.gen_istft_hop_size = gen_istft_hop_size
         self.segment_size = segment_size
         self.use_f0 = use_f0
         self.vocoder = vocoder
@@ -115,8 +103,8 @@ class Synthesizer(torch.nn.Module):
                 )
                 print("    ██████  Vocoder: RefineGAN")
             elif vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                from rvc.lib.algorithm.generators import RingFormerGenerator
-                self.dec = RingFormerGenerator(
+                from rvc.lib.algorithm.generators import RingFormerGeneratorPrior
+                self.dec = RingFormerGeneratorPrior(
                     initial_channel=inter_channels,
                     resblock_kernel_sizes=resblock_kernel_sizes,
                     resblock_dilation_sizes=resblock_dilation_sizes,
@@ -130,27 +118,9 @@ class Synthesizer(torch.nn.Module):
                     checkpointing=checkpointing,
                 )
                 print(f"    ██████  Vocoder: {vocoder}")
-            elif vocoder == "Wavehax":
-                from rvc.lib.algorithm.generators import WavehaxGenerator
-                self.dec = WavehaxGenerator(
-                    in_channels=inter_channels,
-                    channels=convnext_channels, # v1: 32, v2: 16
-                    mult_channels=convnext_expansion_mult, # v1: 2, v2: 3
-                    gin_channels=gin_channels,
-                    kernel_size=convnext_kernel_sizes, # v1: 7, v2: [13, 7]
-                    num_blocks=num_blocks,
-                    n_fft=n_fft, # 480 for 24khz, 960 for 48khz
-                    hop_length=voc_hop, # 240 for 24khz, 480 for 48khz
-                    sample_rate=sr,
-                    prior_type=prior_type,
-                    drop_prob=convnext_drop_prob,
-                    use_layer_norm=use_layer_norm,
-                    use_logmag_phase=use_logmag_phase,
-                )
-                print("    ██████  Vocoder: Wavehax")
-            elif vocoder == "Snake-HiFi-GAN":
-                from rvc.lib.algorithm.generators import SnakeHiFiGANNSFGenerator
-                self.dec = SnakeHiFiGANNSFGenerator(
+            elif vocoder == "PCPH-GAN":
+                from rvc.lib.algorithm.generators import PCPH_GAN_Generator
+                self.dec = PCPH_GAN_Generator(
                     inter_channels,
                     resblock_kernel_sizes,
                     resblock_dilation_sizes,
@@ -161,7 +131,7 @@ class Synthesizer(torch.nn.Module):
                     sr=sr,
                     checkpointing=checkpointing,
                 )
-                print("    ██████  Vocoder: Snake-NSF-HiFi-GAN")
+                print("    ██████  Vocoder: PCPH-GAN")
             else:  # vocoder == "HiFi-GAN"
                 from rvc.lib.algorithm.generators import HiFiGANNSFGenerator
                 self.dec = HiFiGANNSFGenerator(
@@ -177,7 +147,7 @@ class Synthesizer(torch.nn.Module):
                 )
                 print("    ██████  Vocoder: NSF-HiFi-GAN")
         else:
-            if vocoder in ["MRF HiFi-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2", "Wavehax"]:
+            if vocoder in ["MRF HiFi-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"]:
                 print(f"{vocoder} does not support training without pitch guidance.")
                 self.dec = None
             else: # vocoder == "HiFi-GAN"
@@ -290,19 +260,7 @@ class Synthesizer(torch.nn.Module):
 
                     return o, None, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
 
-            if self.vocoder == "Wavehax":
-                if self.randomized:
-                    z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-                    pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                    o, _ = self.dec(z_slice, pitchf, g=g) # f0 output
-
-                    return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
-                else:
-                    o, _ = self.dec(z, pitchf, g=g) # f0 output
-
-                    return o, None, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
-
-            else: # For HiFi-Gan, Snake HiFi-Gan, MRF-HiFi-Gan and RefineGan training
+            else: # For HiFi-Gan, PCPH-Gan, MRF-HiFi-Gan and RefineGan training
                 if self.randomized:
                     z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
 
@@ -379,8 +337,6 @@ class Synthesizer(torch.nn.Module):
 
         if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             o, _, _ = self.dec(z * x_mask, nsff0, g=g)
-        elif self.vocoder == "Wavehax":
-            o, _ = self.dec(z * x_mask, nsff0, g=g)
         else:
             o = (self.dec(z * x_mask, nsff0, g=g) if self.use_f0 else self.dec(z * x_mask, g=g))
 

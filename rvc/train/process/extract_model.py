@@ -83,11 +83,6 @@ def extract_model(
             hps.model.gin_channels,
             hps.data.sample_rate,
         ]
-        # Unused params and configuration entries for certain vocoders
-        if vocoder == "Wavehax":
-            config_list.remove(hps.model.upsample_rates)
-            config_list.remove(hps.model.upsample_initial_channel)
-            config_list.remove(hps.model.upsample_kernel_sizes)
 
         # Assigning to opt config
         opt["config"] = config_list
@@ -110,6 +105,7 @@ def extract_model(
         opt["vocoder"] = vocoder
         opt["vocoder_architecture"] = vocoder_architecture
         opt["vits2_mode"] = vits2_mode
+
         if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             opt["ringformer_istft"] = [
                 hps.model.gen_istft_n_fft,

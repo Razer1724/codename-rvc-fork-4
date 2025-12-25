@@ -40,8 +40,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("faiss").setLevel(logging.WARNING)
 logging.getLogger("faiss.loader").setLevel(logging.WARNING)
 
-debug_ringformer_config = False
-
 class VoiceConverter:
     """
     A class for performing voice conversion using the Retrieval-Based Voice Conversion (RVC) method.
@@ -480,7 +478,6 @@ class VoiceConverter:
             self.hubert_model = self.net_g = self.n_spk = self.vc = self.tgt_sr = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
         self.loaded_index = None
         del self.net_g, self.cpt, self.active_cpt
         if torch.cuda.is_available():
@@ -550,20 +547,10 @@ class VoiceConverter:
             self.vocoder = self.active_cpt.get("vocoder", "HiFi-GAN")
             self.vits2_mode = self.active_cpt.get("vits2_mode", False)
 
-            if debug_ringformer_config:
-                print("Config values:")
-                for i, value in enumerate(self.active_cpt["config"]):
-                    print(f"  [{i}] = {value}")
-
-                print("ringformer_istft values:")
-                for i, value in enumerate(self.active_cpt["ringformer_istft"]):
-                    print(f"  [{i}] = {value}")
-
             if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 ringformer_istft = self.active_cpt.get("ringformer_istft", [None, None])
                 self.gen_istft_n_fft = ringformer_istft[0]
                 self.gen_istft_hop_size = ringformer_istft[1]
-
                 self.net_g = Synthesizer(
                     *self.active_cpt["config"],
                     use_f0=self.use_f0,

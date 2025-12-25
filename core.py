@@ -870,9 +870,6 @@ def parse_arguments():
         help=embedder_model_description,
         choices=[
             "contentvec",
-            "chinese-hubert-base",
-            "japanese-hubert-base",
-            "korean-hubert-base",
             "spin_v1",
             "spin_v2",
             "custom",
@@ -2024,8 +2021,7 @@ def parse_arguments():
         choices=[
             "hifi_mrf_refine", # [NSF-HiFi-GAN, MRF-HiFi-GAN, RefineGAN, Snake-NSF-HiFi-GAN ] ~ They share the same base config
             "ringformer",
-            "wavehax",
-            "snake_nsf_hifigan",
+            "pcph_gan",
         ],
         default="hifi_mrf_refine",
     )
@@ -2068,7 +2064,7 @@ def parse_arguments():
         "--vocoder",
         type=str,
         help="Vocoder name",
-        choices=["HiFi-GAN", "Snake-HiFi-GAN", "MRF HiFi-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2", "Wavehax"],
+        choices=["HiFi-GAN", "PCPH-GAN", "MRF HiFi-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"],
         default="HiFi-GAN",
     )
     train_parser.add_argument(

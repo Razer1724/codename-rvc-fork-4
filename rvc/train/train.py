@@ -64,10 +64,12 @@ from losses import (
     generator_loss,
     discriminator_loss_v2,
     generator_loss_v2,
+    HingeAdversarialLoss,
     feature_loss,
     kl_loss,
     kl_loss_clamped,
     phase_loss,
+    envelope_loss,
 )
 from mel_processing import (
     spec_to_mel_torch,
@@ -153,9 +155,14 @@ randomized = True
 benchmark_mode = False
 enable_persistent_workers = True
 debug_shapes = False
+
 # EXPERIMENTAL
 c_stft = 21.0 # Seems close enough to multi-scale mel loss's magnitude, but needs more testing.
-tprls = False
+adversarial_loss = "lsgan" # Supported adv losses: "lsgan" ( default rvc / vits ), "tprls" or "hinge"
+
+pretrain_preview = True
+override_pretrain_lr = False
+new_pretrain_lr = 9e-5
 
 ##################################################################
 
@@ -293,20 +300,13 @@ def get_g_model(config, sample_rate, vocoder, use_checkpointing, randomized):
 def get_d_model(config, vocoder, use_checkpointing):
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
-        # MPD + MSD + MRD ( unified ) - RingFormer architecture v1
+        # MPD + MSD + MRD ( unified ) - RingFormer architecture v1 and v2
         return MPD_MSD_MRD_Combined(
             config.model.use_spectral_norm,
             use_checkpointing=use_checkpointing,
             **dict(config.mrd)
         )
-    elif vocoder == "Wavehax": # Potentially changed in future - Trial
-        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
-        return MPD_MSD_MRD_Combined(
-            config.model.use_spectral_norm,
-            use_checkpointing=use_checkpointing,
-            **dict(config.mrd)
-        )
-    elif vocoder == "Snake-HiFi-GAN": # Potentially changed in future - Trial
+    elif vocoder == "PCPH-GAN": # Potentially changed in future - Trial
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
         return MPD_MSD_MRD_Combined(
             config.model.use_spectral_norm,
@@ -472,6 +472,16 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             _, _, _, epoch_str, gradscaler_dict = load_checkpoint(architecture, g_checkpoint_path, net_g, optim_g)
             _, _, _, epoch_str, _ = load_checkpoint(architecture, d_checkpoint_path, net_d, optim_d)
 
+            if override_pretrain_lr:
+                new_lr_for_pretrain = new_pretrain_lr
+                for param_group in optim_g.param_groups:
+                    param_group['lr'] = new_lr_for_pretrain
+                    param_group['initial_lr'] = new_lr_for_pretrain
+                for param_group in optim_d.param_groups:
+                    param_group['lr'] = new_lr_for_pretrain
+                    param_group['initial_lr'] = new_lr_for_pretrain
+                print(f"[OVERRIDE] Pretrain LR Override: {new_lr_for_pretrain}")
+
             epoch_str += 1
             global_step = (epoch_str - 1) * len(train_loader)
             print(f"[RESUMING] (G) & (D) at global_step: {global_step} and epoch count: {epoch_str - 1}")
@@ -510,6 +520,13 @@ def prepare_schedulers(optim_g, optim_d, use_warmup, warmup_duration, use_lr_sch
 
     num_batches_per_epoch = len(train_loader)
 
+    if override_pretrain_lr:
+        scheduler_resume_epoch = -1
+        scheduler_resume_step = -1
+    else:
+        scheduler_resume_epoch = epoch_str - 1
+        scheduler_resume_step = global_step - 1
+
     if use_warmup:
         warmup_scheduler_g = torch.optim.lr_scheduler.LambdaLR(
             optim_g, lr_lambda=lambda epoch: min(1.0, (epoch + 1) / warmup_duration)
@@ -532,18 +549,18 @@ def prepare_schedulers(optim_g, optim_d, use_warmup, warmup_duration, use_lr_sch
 
         if lr_scheduler == "exp decay epoch":
             # Exponential decay lr scheduler per epoch
-            scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=exp_decay_gamma, last_epoch=epoch_str - 1)
-            scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=exp_decay_gamma, last_epoch=epoch_str - 1)
+            scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=exp_decay_gamma, last_epoch=scheduler_resume_epoch)
+            scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=exp_decay_gamma, last_epoch=scheduler_resume_epoch)
 
         elif lr_scheduler == "exp decay step":
             # Exponential decay lr scheduler per step
-            scheduler_g = torch.optim.lr_scheduler.LambdaLR(optim_g, lr_lambda=lambda step: exp_decay_gamma_step ** step, last_epoch=global_step - 1)
-            scheduler_d = torch.optim.lr_scheduler.LambdaLR(optim_d, lr_lambda=lambda step: exp_decay_gamma_step ** step, last_epoch=global_step - 1)
+            scheduler_g = torch.optim.lr_scheduler.LambdaLR(optim_g, lr_lambda=lambda step: exp_decay_gamma_step ** step, last_epoch=scheduler_resume_step)
+            scheduler_d = torch.optim.lr_scheduler.LambdaLR(optim_d, lr_lambda=lambda step: exp_decay_gamma_step ** step, last_epoch=scheduler_resume_step)
 
         elif lr_scheduler == "cosine annealing epoch":
             # Cosine annealing lr scheduler per epoch
-            scheduler_g = torch.optim.lr_scheduler.CosineAnnealingLR(optim_g, T_max=total_epoch_count, eta_min=3e-5, last_epoch=epoch_str - 1)
-            scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(optim_d, T_max=total_epoch_count, eta_min=3e-5, last_epoch=epoch_str - 1)
+            scheduler_g = torch.optim.lr_scheduler.CosineAnnealingLR(optim_g, T_max=total_epoch_count, eta_min=3e-5, last_epoch=scheduler_resume_epoch)
+            scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(optim_d, T_max=total_epoch_count, eta_min=3e-5, last_epoch=scheduler_resume_epoch)
 
     return warmup_scheduler_g, warmup_scheduler_d, scheduler_g, scheduler_d
 
@@ -749,6 +766,9 @@ def run(
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)
 
+    # Hinge adversarial loss
+    fn_hinge_loss = HingeAdversarialLoss() if adversarial_loss == "hinge" else None
+
     # Loading of models and optims
     net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict = load_models_and_optimizers(
         config,
@@ -774,7 +794,7 @@ def run(
     if pretrainG in ["", "None"] and pretrainD in ["", "None"]:
         from_scratch = True
         if rank == 0:
-            print("    ██████  No pretrains used: Average loss disabled!")
+            print("[INIT] No pretrains used: Average loss disabled!")
 
     # Prepare the schedulers
     warmup_scheduler_g, warmup_scheduler_d, scheduler_g, scheduler_d = prepare_schedulers(
@@ -798,7 +818,7 @@ def run(
     gradscaler = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
     if len(gradscaler_dict) > 0:
         gradscaler.load_state_dict(gradscaler_dict)
-        print("    ██████  Loading gradscaler state dict - FP16")
+        print("[INIT] Loading gradscaler state dict - FP16")
 
 
     # Reference sample for live-infer
@@ -807,11 +827,16 @@ def run(
     # Cache for training with " cache " enabled
     cache = []
 
-    # Debug for tprls
-    if tprls:
+    # GAN Loss debug
+    if adversarial_loss == "tprls":
         print("------ GAN LOSS VARIANT: TPRLS ------")
-    else:
+    elif adversarial_loss == "hinge":
+        print("------ GAN LOSS VARIANT: HINGE ------")
+    elif adversarial_loss == "lsgan":
         print("------ GAN LOSS VARIANT: LSGAN ------")
+    else:
+        print(f"------ {adversarial_loss} LOSS VARIANT IS NOT SUPPORTED. Exiting .. ------")
+        sys.exit(1)
 
     for epoch in range(epoch_str, total_epoch_count + 1):
         training_loop(
@@ -835,6 +860,7 @@ def run(
             fn_spectral_loss,
             n_gpus,
             gradscaler,
+            fn_hinge_loss,
             hann_window,
         )
 
@@ -883,6 +909,7 @@ def training_loop(
     fn_spectral_loss,
     n_gpus,
     gradscaler,
+    fn_hinge_loss=None,
     hann_window=None,
 ):
     """
@@ -921,6 +948,8 @@ def training_loop(
     if writers is not None:
         writer = writers[0]
 
+    fn_hinge_loss = fn_hinge_loss if fn_hinge_loss is not None else None
+    
     train_loader.batch_sampler.set_epoch(epoch)
 
     net_g.train()
@@ -941,9 +970,20 @@ def training_loop(
 
     epoch_recorder = EpochRecorder()
 
+    # if not from_scratch:
+        # # Tensors init for averaged losses:
+        # tensor_count = 7 if vocoder in ["RingFormer_v1", "RingFormer_v2"] else 6
+        # epoch_loss_tensor = torch.zeros(tensor_count, device=device)
+        # num_batches_in_epoch = 0
+
     if not from_scratch:
         # Tensors init for averaged losses:
-        tensor_count = 7 if vocoder in ["RingFormer_v1", "RingFormer_v2"] else 6
+        if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+            tensor_count = 7
+        elif vocoder == "PCPH-GAN":
+            tensor_count = 8
+        else:
+            tensor_count = 6
         epoch_loss_tensor = torch.zeros(tensor_count, device=device)
         num_batches_in_epoch = 0
 
@@ -961,6 +1001,11 @@ def training_loop(
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
         avg_50_cache.update({
             "loss_sd_50": deque(maxlen=50),
+        })
+
+    if vocoder in "PCPH-GAN":
+        avg_50_cache.update({
+            "loss_env_50": deque(maxlen=50),
         })
 
     use_amp = (config.train.bf16_run or config.train.fp16_run) and device.type == "cuda"
@@ -1020,10 +1065,13 @@ def training_loop(
 
             with autocast(device_type="cuda", enabled=False):
                 # Compute discriminator loss:
-                if not tprls:
+                if adversarial_loss == "lsgan":
                     loss_disc = discriminator_loss(y_d_hat_r, y_d_hat_g)
-                else:
+                elif adversarial_loss == "tprls":
                     loss_disc = discriminator_loss_v2(y_d_hat_r, y_d_hat_g)
+                elif adversarial_loss == "hinge":
+                    loss_fake, loss_real = fn_hinge_loss(y_d_hat_g, y_d_hat_r)
+                    loss_disc = loss_fake + loss_real
 
             # Discriminator backward and update:
             optim_d.zero_grad(set_to_none=True)
@@ -1059,11 +1107,13 @@ def training_loop(
                 loss_fm = feature_loss(fmap_r, fmap_g)
      
                 # Generator loss
-                if not tprls:
+                if adversarial_loss == "lsgan":
                     loss_adv = generator_loss(y_d_hat_g)
-                else:
+                elif adversarial_loss == "tprls":
                     y_d_hat_r_detached = [i.detach() for i in y_d_hat_r]
                     loss_adv = generator_loss_v2(y_d_hat_g, y_d_hat_r_detached)
+                elif adversarial_loss == "hinge":
+                    loss_adv = fn_hinge_loss(y_d_hat_g)
 
                 # KL ( Kullback–Leibler divergence ) loss
                 if use_kl_annealing:
@@ -1080,9 +1130,14 @@ def training_loop(
                     loss_phase = phase_loss(y_stft, y_hat_stft)
                     loss_sd = (loss_magnitude + loss_phase) * 0.7
 
+                if vocoder == "PCPH-GAN":
+                    loss_env = envelope_loss(y, y_hat)
+
                 # Total generator loss
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta + loss_sd
+                elif vocoder == "PCPH-GAN":
+                    loss_gen_total = loss_adv + loss_fm + loss_mel + loss_env * 1.0 + loss_kl * kl_beta
                 else:
                     loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta
 
@@ -1118,6 +1173,8 @@ def training_loop(
                 epoch_loss_tensor[5].add_(loss_kl.detach())
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     epoch_loss_tensor[6].add_(loss_sd.detach())
+                if vocoder == "PCPH-GAN":
+                    epoch_loss_tensor[6].add_(loss_env.detach())
 
             # queue for rolling losses / grads over 50 steps
             # Grads:
@@ -1132,6 +1189,8 @@ def training_loop(
             avg_50_cache["loss_kl_50"].append(loss_kl.detach())
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 avg_50_cache["loss_sd_50"].append(loss_sd.detach())
+            if vocoder == "PCPH-GAN":
+                avg_50_cache["loss_env_50"].append(loss_env.detach())
 
             if rank == 0 and global_step % 50 == 0:
                 scalar_dict_50 = {}
@@ -1177,9 +1236,28 @@ def training_loop(
                         "loss_avg_50/loss_sd_50": torch.mean(
                             torch.stack(list(avg_50_cache["loss_sd_50"]))),
                     })
+                if vocoder == "PCPH-GAN":
+                    scalar_dict_50.update({
+                        # Losses:
+                        "loss_avg_50/loss_env_50": torch.mean(
+                            torch.stack(list(avg_50_cache["loss_env_50"]))),
+                    })
 
                 summarize(writer=writer, global_step=global_step, scalars=scalar_dict_50)
                 flush_writer(writer, rank)
+
+            if from_scratch and pretrain_preview and rank == 0 and global_step % 50 == 0:
+                print(f"    ██████  Generating pretrain-preview at step: {global_step}...")
+                o = eval_infer(net_g, reference)
+                audio_dict = {f"gen/audio_pretrain_{global_step}s": o[0, :, :]}
+                summarize(
+                    writer=writer,
+                    global_step=global_step,
+                    audios=audio_dict,
+                    audio_sample_rate=config.data.sample_rate,
+                )
+                flush_writer(writer, rank)
+                torch.cuda.empty_cache()
 
             pbar.update(1)
         # end of batch train
@@ -1255,6 +1333,11 @@ def training_loop(
                 scalar_dict_avg.update({
                     "loss_avg/loss_sd": avg_epoch_loss[6].item(),
                 })
+            if vocoder == "PCPH-GAN":
+                scalar_dict_avg.update({
+                    "loss_avg/loss_env": avg_epoch_loss[6].item(),
+                })
+
 
             summarize(writer=writer, global_step=global_step, scalars=scalar_dict_avg)
             flush_writer(writer, rank)

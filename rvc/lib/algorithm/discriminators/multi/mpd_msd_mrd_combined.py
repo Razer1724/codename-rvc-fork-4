@@ -29,7 +29,7 @@ class MPD_MSD_MRD_Combined(torch.nn.Module):
         self.mrd_cfg = multi_resolution_cfg
         self.use_checkpointing = use_checkpointing
 
-        periods = [2, 3, 5, 7, 11, 17, 23, 37]
+        periods = [2, 3, 5, 7, 11] # [2, 3, 5, 7, 11, 17, 23, 37]  -  MPD carry style
 
         self.resolutions = self.mrd_cfg["resolutions"]
 

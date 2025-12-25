@@ -1,52 +1,81 @@
 import os
-import glob
-from tensorboard.backend.event_processing import event_accumulator
+import shutil
+from tensorboard.backend.event_processing.event_file_loader import EventFileLoader
 from torch.utils.tensorboard import SummaryWriter
 
-def main():
-    log_dir = input("Enter the path to your TensorBoard log directory: ").strip()
-    if not os.path.isdir(log_dir):
-        print("Provided path is not a valid directory.")
+def clean_tfevents():
+    input_path = input("Enter the full path or filename of the tfevents file: ").strip()
+    if not os.path.exists(input_path):
+        print(f"Error: File '{input_path}' not found.")
         return
 
     try:
-        step_threshold = int(input("Enter the maximum step to KEEP (e.g. 26257): ").strip())
+        epochs_to_keep = int(input("How many full epochs to keep? (e.g., 2): "))
+        steps_per_epoch = int(input("How many steps are in 1 epoch? (e.g., 2687): "))
     except ValueError:
-        print("Invalid number for step.")
+        print("Error: Please enter valid integers.")
         return
 
-    log_dir_filtered = log_dir.rstrip("/\\") + "_filtered"
-    os.makedirs(log_dir_filtered, exist_ok=True)
+    epoch_end_step = epochs_to_keep * steps_per_epoch
+    standard_metric_cutoff = (epoch_end_step // 50) * 50
 
-    event_files = sorted(glob.glob(os.path.join(log_dir, "events.out.tfevents.*")))
-    if not event_files:
-        print("No event files found in the directory.")
-        return
+    special_tag = "Metric/Mel_Spectrogram_Similarity"
 
-    writer = SummaryWriter(log_dir_filtered)
+    print(f"\n--- Alignment Plan ---")
+    print(f"Epoch End Step: {epoch_end_step} (Keeping '{special_tag}' up to here)")
+    print(f"Standard Metric Cutoff: {standard_metric_cutoff} (Rounding down to nearest 50)")
+    print(f"----------------------")
 
-    max_step_written = 0
+    base_dir = os.path.dirname(os.path.abspath(input_path))
+    original_filename = os.path.basename(input_path)
+    backup_folder = os.path.join(base_dir, "old_tfevents_backup")
+    temp_output_dir = os.path.join(base_dir, "temp_trim_process")
 
-    for file in event_files:
-        ea = event_accumulator.EventAccumulator(file)
-        try:
-            ea.Reload()
-        except Exception as e:
-            print(f"Skipping corrupted or unreadable file: {file}\n{e}")
+    if not os.path.exists(backup_folder):
+        os.makedirs(backup_folder)
+
+    writer = SummaryWriter(log_dir=temp_output_dir)
+    loader = EventFileLoader(input_path)
+
+    count = 0
+    removed = 0
+
+    for event in loader.Load():
+        keep_event = False
+
+        is_special = False
+        if event.summary:
+            for value in event.summary.value:
+                if value.tag == special_tag:
+                    is_special = True
+                    break
+
+        if is_special:
+            if event.step <= epoch_end_step:
+                keep_event = True
+        else:
+            if event.step <= standard_metric_cutoff:
+                keep_event = True
+
+        if event.HasField('file_version'):
             continue
 
-        for tag in ea.Tags().get('scalars', []):
-            events = ea.Scalars(tag)
-            for ev in events:
-                if ev.step <= step_threshold:
-                    writer.add_scalar(tag, ev.value, ev.step)
-                    max_step_written = max(max_step_written, ev.step)
-
+        if keep_event:
+            writer.file_writer.add_event(event)
+            count += 1
+        else:
+            removed += 1
 
     writer.close()
 
-    print(f"\nFiltered logs saved to: {log_dir_filtered}")
-    print(f"Maximum step retained in filtered logs: {max_step_written}")
+    new_file_name = os.listdir(temp_output_dir)[0]
+    new_file_path = os.path.join(temp_output_dir, new_file_name)
+
+    shutil.move(input_path, os.path.join(backup_folder, original_filename))
+    shutil.move(new_file_path, os.path.join(base_dir, original_filename))
+    os.rmdir(temp_output_dir)
+
+    print(f"Success! Kept {count} events, removed {removed} extra steps/metrics.")
 
 if __name__ == "__main__":
-    main()
+    clean_tfevents()

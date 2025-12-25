@@ -350,16 +350,21 @@ class ResBlock(torch.nn.Module):
             x_residual = x # Residual store
 
             xt = torch.nn.functional.leaky_relu(x, LRELU_SLOPE) # Activation 1
-            xt = apply_mask(xt, x_mask) # Masking 1
+            if x_mask is not None: # Masking 1
+                xt = xt * x_mask
+
             xt = conv1(xt) # Conv 1
 
             xt = torch.nn.functional.leaky_relu(xt, LRELU_SLOPE) # Activation 2
-            xt = apply_mask(xt, x_mask) # Masking 2
+            if x_mask is not None: # Masking 2
+                xt = xt * x_mask
+
             xt = conv2(xt) # Conv 2
 
             x = xt + x_residual # Residual connection
 
-            x = apply_mask(x, x_mask) # Mask
+            if x_mask is not None: # Final mask
+                xt = xt * x_mask
 
         return x
 

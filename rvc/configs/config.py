@@ -20,16 +20,10 @@ arch_config_paths = {
         os.path.join("ringformer_v2", "32000.json"),
         os.path.join("ringformer_v2", "24000.json"),
     ],
-    "wavehax": [
-        os.path.join("wavehax", "48000.json"),
-        os.path.join("wavehax", "40000.json"),
-        os.path.join("wavehax", "32000.json"),
-        os.path.join("wavehax", "24000.json"),
-    ],
-    "snake_nsf_hifigan": [
-        os.path.join("snake_nsf_hifigan", "48000.json"),
-        os.path.join("snake_nsf_hifigan", "40000.json"),
-        os.path.join("snake_nsf_hifigan", "32000.json"),
+    "pcph_gan": [
+        os.path.join("pcph_gan", "48000.json"),
+        os.path.join("pcph_gan", "40000.json"),
+        os.path.join("pcph_gan", "32000.json"),
     ],
 }
 
@@ -119,7 +113,7 @@ class Config:
             except FileNotFoundError:
                 print(f"File not found: {full_config_path}")
 
-        for config_path in arch_config_paths["wavehax"]:
+        for config_path in arch_config_paths["ringformer_v3"]:
             full_config_path = os.path.join("rvc", "configs", config_path)
             try:
                 with open(full_config_path, "r") as f:
@@ -131,7 +125,7 @@ class Config:
             except FileNotFoundError:
                 print(f"File not found: {full_config_path}")
 
-        for config_path in arch_config_paths["snake_nsf_hifigan"]:
+        for config_path in arch_config_paths["pcph_gan"]:
             full_config_path = os.path.join("rvc", "configs", config_path)
             try:
                 with open(full_config_path, "r") as f:
