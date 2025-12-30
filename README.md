@@ -34,7 +34,7 @@
 - If you don't understand what it does, what it brings or how it works? preferably don't use it.
 - Certain features / currently chosen params can be potentially unstable or broken and are a subject to change.
 - Not all experimental features gonna reach "stable" status ( There's only as much I can test/ablation study on my own. )
-- Some experimental things might disappear at some point if deemed too unstable / not worth it.***
+- Some experimental things might disappear at some point if deemed too unstable / not worth it.
 
 `3. Clarification on pretrained models, architectures & vocoders:`
 - **Each Architecture/Vocoder requires own dedicated pretrains.**
@@ -42,49 +42,48 @@
 - The original architecture. ( HiFi-GAN + MPD, MSD )
 - It's pretrained models are auto-downloaded during the first launch.
 - Available for sample rates: 48, 40 and 32khz. <br/><br/>`Models made with this arch are cross-compatible: RVC, Applio and codename-rvc-fork-4.` 
-##### 2. MRF-HiFi-GAN & RefineGAN ( Fork/Applio architecture ):
-- Custom architecture. ( MRF-HiFi-GAN / RefineGAN + MPD, MSD )
-- **Not 100% sure on the status of pretrains yet. Once I get more info, will update this entry.** <br/><br/>`Models made with this arch are LIMITED cross-compatible: codename-rvc-fork-4 and Applio`
-##### 2. RingFormer ( Fork architecture ):
+##### 2. RefineGAN ( Fork / Applio architecture ):
+- Custom architecture. ( RefineGAN + MPD, MSD )
+- **Pretrains available. For more info, visit my discord server.** <br/><br/>`Models made with this arch are LIMITED cross-compatible: codename-rvc-fork-4 and Applio`
+##### 3. RingFormer ( Fork architecture ):
 - Custom architecture. ( RingFormer + MPD, MSD, MRD )
-- **There are no available pretrained models for it yet.**
-- Planned supported sample rates: 48khz ( and *maybe* 24khz, but that's up to dr87 ).<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
+- **There are no available pretrained models for it. atm it's unsure if there will be any.**
+- Supported sample rates: 24, 32, 40 and 48khz.<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
+##### 4. PCPH-GAN ( Fork architecture ):
+- Custom architecture. ( PCPH-GAN + MPD, MSD, MRD )
+- **There are no available pretrained models for it yet. Currently in test/prototyping phase.**
+- Supported sample rates: 32, 40 and 48khz.<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
 <br/>
 
-# **Fork's features:**
+# **Fork's exclusive features:**
  
-- Hold-Out type validation mechanism during training. ( L1 MEL, mrSTFT, PESQ, SI-SDR )  ` In between epochs. `
+- Hold-Out type validation mechanism during training. `( L1 MEL, mrSTFT, PESQ, SI-SDR )`
  
-- FP16-AMP, BF16-AMP, TF32, FP32 Training modes available.  ` BF16 & TF32 require Ampere or newer GPUs. `<br/>
-`BF16 and TF32 can be used simultaneously for extra speed gains.`
-> NOTE: BF16 is used by default ( and bf16-AdamW ). If unsupported hardware detected, switched back to FP32. Inference is only in FP32.
-
+- Support for 'Spin' embedder. ` ( and perhaps more in future. ) `
  
-- Support for 'Spin' embedder.
+- Many available optimizers.  ` ( AdamW [and optimi variant for bf16), RAdam, AdamSPD, Ranger21, DiffGrad, Prodigy ) `
  
-- Ability to choose an optimizer.  ` ( Supported: AdamW, AdamW_BF16, RAdam, AdamSPD, Ranger21, DiffGrad, Prodigy ) `
- 
-- (EXP) Double-update strategy for Discriminator.
- 
-- Support for custom input-samples used during training for live-preview of model's reconstruction performance.
- 
-- Mel spectrogram %-based similarity metric.
+- Different adversarial losses to try. ` ( Available: lsgan, hinge, tprls. [ lsgan is the safe / rvc's default one. ] ) `
  
 - Support for Multi-scale, classic L1 mel and (EXP) multi-resolution stft spectral losses.
  
 - Support for some of VITS2 enhancements.
-`( Transformer-enhanced normalizing flow + spk conditioned text encoder. )`
+`( Transformer-enhanced normalizing flow + spk conditioned text encoder. )`<br/>
+`( Requires pretrains that were trained with it enabled. )`
  
-- Support for the following vocoders: HiFi-GAN-NSF, MRF-HiFi-gan, Refine-GAN, RingFormer, Wavehax, Snake-HiFi-GAN-NSF.<br/>
-` RingFormer, Wavehax and Snake-HiFi-GAN-NSF architectures utilize MPD, MSD and MRD Discs combo.`
+- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, PCPH-GAN.<br/>
+` RingFormer and PCPH-GAN architectures utilize MPD, MSD and MRD Discs combo.`
  
-- Checkpointing and various speed / memory optimizations compared to og RVC.
+- Much better loss logging handling.
+`( Per-epoch-avg loss as the main one, over-50-steps-avg as the long-term / general tendency one )`
  
-- New logging mechanism for losses: Average loss per epoch logged as the standard loss, <br/>and rolling average loss over 50 steps to evaluate general trends and the model's performance over time.
+- More sophisticated dataset-preprocessing approach.
  
-- From-ui quick tweaks; lr for g/d, schedulers, linear warmup, kl loss annealing and more ..
+- Quick from-ui tweaks ` ( lr for g/d, lr schedulers, linear warmup, kl loss annealing and much more .. )`
+ 
+- Various speed and performance improvements.
 
-**Any new / experimental features are always highlighted in releases so, feel free to check it out there.**
+**Any new / experimental features are always described in releases so, feel free to check it out there.**
   
  
  
@@ -92,7 +91,8 @@
  
  
 ✨ to-do list ✨
-> - None
+> - Better long-term logging for pretrained / base models training.
+> - Some additional feedback during training in terms of model's performance. 
  
 💡 Ideas / concepts 💡
 > - Currently none. Open to your ideas ~
@@ -128,9 +128,9 @@ To monitor training or visualize data:
 ## Referenced projects
 + [RingFormer](https://github.com/seongho608/RingFormer)
 + [RiFornet](https://github.com/Respaired/RiFornet_Vocoder)
-+ [bfloat_optimizer (AdamW BF16)](https://github.com/lessw2020/bfloat_optimizer)
 + [BigVGAN](https://github.com/NVIDIA/BigVGAN/tree/main)
 + [Pytorch-Snake](https://github.com/falkaer/pytorch-snake)
++ [wavehax](https://github.com/chomeyama/wavehax)
 
  
 ## Disclaimer
