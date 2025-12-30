@@ -76,22 +76,7 @@ class Synthesizer(torch.nn.Module):
                 f0=use_f0,
             )
         if use_f0:
-            if vocoder == "MRF HiFi-GAN":
-                from rvc.lib.algorithm.generators import HiFiGANMRFGenerator
-                self.dec = HiFiGANMRFGenerator(
-                    in_channel=inter_channels,
-                    upsample_initial_channel=upsample_initial_channel,
-                    upsample_rates=upsample_rates,
-                    upsample_kernel_sizes=upsample_kernel_sizes,
-                    resblock_kernel_sizes=resblock_kernel_sizes,
-                    resblock_dilations=resblock_dilation_sizes,
-                    gin_channels=gin_channels,
-                    sample_rate=sr,
-                    harmonic_num=8,
-                    checkpointing=checkpointing,
-                )
-                print("    ██████  Vocoder: NSF-HiFi-GAN ( MRF VARIANT )")
-            elif vocoder == "RefineGAN":
+            if vocoder == "RefineGAN":
                 from rvc.lib.algorithm.generators import RefineGANGenerator
                 self.dec = RefineGANGenerator(
                     sample_rate=sr,
@@ -147,7 +132,7 @@ class Synthesizer(torch.nn.Module):
                 )
                 print("    ██████  Vocoder: NSF-HiFi-GAN")
         else:
-            if vocoder in ["MRF HiFi-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"]:
+            if vocoder in ["RefineGAN", "RingFormer_v1", "RingFormer_v2"]:
                 print(f"{vocoder} does not support training without pitch guidance.")
                 self.dec = None
             else: # vocoder == "HiFi-GAN"
@@ -260,7 +245,7 @@ class Synthesizer(torch.nn.Module):
 
                     return o, None, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
 
-            else: # For HiFi-Gan, PCPH-Gan, MRF-HiFi-Gan and RefineGan training
+            else: # For HiFi-Gan, PCPH-Gan and RefineGan training
                 if self.randomized:
                     z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
 

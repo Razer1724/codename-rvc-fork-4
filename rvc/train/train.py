@@ -319,7 +319,7 @@ def get_d_model(config, vocoder, use_checkpointing):
             config.model.use_spectral_norm,
             use_checkpointing=use_checkpointing
         )
-    else: # For HiFi-GAN or MRF-HiFi-GAN
+    else: # For NSF HiFi-GAN
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_Combined
         # MPD + MSD ( unified ) - Original RVC Setup
         return MPD_MSD_Combined(

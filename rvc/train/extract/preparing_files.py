@@ -18,7 +18,7 @@ def generate_config(sample_rate: int, model_path: str, vocoder_arch: str):
         print(f"Config file already exists at {config_save_path}")
 
 def generate_filelist(
-    model_path: str, sample_rate: int, include_mutes: int = 2, embedder_model: str = "contentvec", vocoder_arch: str = "hifi_mrf_refine"
+    model_path: str, sample_rate: int, include_mutes: int = 2, embedder_model: str = "contentvec", vocoder_arch: str = "hifi_refine"
 ):
     gt_wavs_dir = os.path.join(model_path, "sliced_audios")
     feature_dir = os.path.join(model_path, f"extracted")
