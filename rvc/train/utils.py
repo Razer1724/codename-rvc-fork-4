@@ -589,6 +589,9 @@ def print_init_setup(
     exp_decay_gamma,
     use_kl_annealing,
     kl_annealing_cycle_duration,
+    spectral_loss,
+    adversarial_loss,
+    use_env_loss,
 ):
     # Warmup init msg:
     if rank == 0:
@@ -622,6 +625,29 @@ def print_init_setup(
 
         # Optimizer check:
         print(f"    ██████  Optimizer used: {optimizer_choice}")
+
+
+        # Spectral loss check:
+        if spectral_loss == "L1 Mel Loss":
+            print("    ██████  Spectral loss: Single-Scale (L1) Mel loss function")
+        elif spectral_loss == "Multi-Scale Mel Loss":
+            print("    ██████  Spectral loss: Multi-Scale Mel loss function")
+        elif spectral_loss == "Multi-Res STFT Loss":
+            print("    ██████  Spectral loss: Multi-Resolution STFT loss function")
+
+        # Adversarial loss check:
+        if adversarial_loss == "tprls":
+            print("    ██████  Adversarial loss: TPRLS")
+        elif adversarial_loss == "hinge":
+            print("    ██████  Adversarial loss: HINGE")
+        elif adversarial_loss == "lsgan":
+            print("    ██████  Adversarial loss: LSGAN")
+
+        # Envelope loss check:
+        if use_env_loss:
+            print("    ██████  Envelope loss: Enabled")
+        else:
+            print("    ██████  Envelope loss: Not Enabled")
 
         # Validation check:
         print(f"    ██████  Using Validation: {use_validation}")

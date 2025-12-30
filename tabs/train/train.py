@@ -346,6 +346,15 @@ def train_tab():
                     visible=True,
                     key='optimizer'
                 )
+                adversarial_loss = gr.Radio(
+                    label="Adversarial loss",
+                    info="Choose an adversarial loss used in training: \n  \n- **lsgan:** Default and one you should use.  \n- **hinge:** Margin-based. Provides stronger discriminator pressure early in training. \n ( Unstable on small and / or noisy datasets. Likely requires learning rate tweaking. ) \n- **tprls:** Relativistic regularizer on top of lsgan. Experimental. \n ( Might have use in outlier-heavy or very noisy / garbage datasets. )",
+                    choices=["lsgan", "hinge", "tprls"],
+                    value="lsgan",
+                    interactive=True,
+                    visible=True,
+                    key='adversarial_loss'
+                )
             with gr.Column():
                 sampling_rate = gr.Radio(
                     label="Sampling Rate",
@@ -357,7 +366,7 @@ def train_tab():
                 )
                 vocoder = gr.Radio(
                     label="Vocoder",
-                    info="**Vocoder for audio synthesis:** \n \n **HiFi-GAN:** \n- **Arch overview:ㅤHiFi-GAN + Hn-NSF for f0 handling. ( RVC's og vocoder )** \n- **COMPATIBILITY:ㅤAll clients incl. Mainline RVC / W-okada etc.** \n\n**MRF HiFi-GAN:** \n - **Arch overview:ㅤHiFi-Gan + Hn-NSF + MRF block** \n- **COMPATIBILITY:ㅤThis Fork or Applio ( afaik, no rt-vc clients support it. )** \n\n**RefineGAN:** \n - **Arch overview:ㅤHiFi-Gan + Hn-NSF + ParallelResBlock + AdaIN** \n- **COMPATIBILITY:ㅤThis Fork or Applio ( As for rt-vc, vonovox beta supports it. )** \n\n**RingFormer:** \n- **Arch overview:ㅤA hybrid Conformer-Based Vocoder + Snake-Beta act. + RingAttention + Hn-NSF** \n- **COMPATIBILITY:ㅤThis Fork ( As for rt-vc, 'Vonovox' supports it. )**  \n\n**PCPH-GAN:** \n- **Arch overview: HiFi-Gan + PCPH prior + SnakeBeta & Silu ** \n- **COMPATIBILITY:ㅤThis Fork ( No rt-vc clients support it atm. )** \n\n **NOTES:** \n **( RingFormer Requires min. RTX 30xx [ At least Ampere microarchitecture ] )** \n **( Each Vocoder and it's supported sample rates require appropriate pretrained models. )**",
+                    info="**Vocoder for audio synthesis:** \n \n **HiFi-GAN:** \n- **Arch overview:ㅤHiFi-GAN + Hn-NSF for f0 handling. ( RVC's og vocoder )** \n- **COMPATIBILITY:ㅤAll clients incl. Mainline RVC / W-okada etc.** \n\n**MRF HiFi-GAN:** \n - **Arch overview:ㅤHiFi-Gan + Hn-NSF + MRF block** \n- **COMPATIBILITY:ㅤThis Fork or Applio ( afaik, no rt-vc clients support it. )** \n\n**RefineGAN:** \n - **Arch overview:ㅤHiFi-Gan + Hn-NSF + ParallelResBlock + AdaIN** \n- **COMPATIBILITY:ㅤThis Fork or Applio ( As for rt-vc, vonovox beta supports it. )** \n\n**RingFormer:** \n- **Arch overview:ㅤA hybrid Conformer-Based Vocoder + Snake-Beta act. + RingAttention + Hn-NSF** \n- **COMPATIBILITY:ㅤThis Fork ( As for rt-vc, 'Vonovox' supports it. )**  \n\n**PCPH-GAN:** \n- **Arch overview: HiFi-Gan + PCPH prior + SnakeBeta & Silu** \n- **COMPATIBILITY:ㅤThis Fork ( No rt-vc clients support it atm. )** \n\n **NOTES:** \n **( RingFormer Requires min. RTX 30xx [ At least Ampere microarchitecture ] )** \n **( Each Vocoder and it's supported sample rates require appropriate pretrained models. )**",
                     choices=["HiFi-GAN"],
                     value="HiFi-GAN",
                     interactive=False,
@@ -768,6 +777,14 @@ def train_tab():
                         interactive=True,
                         key='spectral_loss'
                     )
+                    use_env_loss = gr.Checkbox(
+                        label="Use envelope loss",
+                        #info="Enables envelope loss for training. \n Might help with phase, waveform and transients consistency. Disabled by default. \n **Mandatory for PCPH-GAN.**",
+                        info="Enables envelope loss during training. \n Helps match volume peaks and troughs, improving waveform transients, phase consistency, and overall audio clarity. Disabled by default. \n**Required for PCPH-GAN.**",
+                        value=False,
+                        interactive=True,
+                        key='use_env_loss'
+                    )
                     lr_scheduler = gr.Radio(
                         label="Learning rate scheduler",
                         info="- **exp decay:** Decays the lr exponentially - **Safe default.** \n **( 'step' variant decays per step, 'epoch' per epoch. For finetuning per-step is recommended. )** \n- **cosine annealing:** Cosine annealing schedule - **Optional alternative.** \n- **none:** No scheduler - **For debugging or developing.**",
@@ -891,15 +908,15 @@ def train_tab():
                     with gr.Accordion("Custom lr settings"):
                         custom_lr_g = gr.Textbox(
                             label="Learning rate for Generator",
-                            placeholder="e.g. 0.0001 or 1e-4",
-                            info="Define the lr for generator. Accepts both decimals and scientific notation i.e. '1e-4'. ",
+                            placeholder="Default is 1e-4 / 0.0001",
+                            info="Define the lr for generator. **Accepts** both **decimals and scientific notation** e.g.: **1e-4** or **0.0001**. \n If using custom lr, **both for G/D must be provided.**",
                             interactive=True,
                             key='custom_lr_g'
                         )
                         custom_lr_d = gr.Textbox(
                             label="Learning rate for Discriminator",
-                            placeholder="e.g. 0.0001 or 1e-4",
-                            info="Define the lr for discriminator. Accepts both decimals and scientific notation i.e. '1e-4'. ",
+                            placeholder="Default is 1e-4 / 0.0001",
+                            info="Define the lr for discriminator. **Accepts** both **decimals and scientific notation** e.g.: **1e-4** or **0.0001**. \n If using custom lr, **both for G/D must be provided.**",
                             interactive=True,
                             key='custom_lr_d'
                         )
@@ -960,11 +977,13 @@ def train_tab():
                     vocoder,
                     architecture,
                     optimizer,
+                    adversarial_loss,
                     use_checkpointing,
                     use_tf32,
                     use_benchmark,
                     use_deterministic,
                     spectral_loss,
+                    use_env_loss,
                     lr_scheduler,
                     exp_decay_gamma,
                     use_validation,
@@ -1165,7 +1184,7 @@ def train_tab():
             
             saved_components.extend([
                 # Model settings
-                architecture, optimizer, vocoder, sampling_rate, cpu_threads, extract_gpu,
+                architecture, optimizer, adversarial_loss, vocoder, sampling_rate, cpu_threads, extract_gpu,
 
                 # Preprocessing
                 dataset_path, loading_resampling, normalization_mode,
@@ -1181,7 +1200,7 @@ def train_tab():
                 batch_size, epoch_save_frequency, total_epoch_count,
                 save_only_latest_net_models, save_weight_models, pretrained,
                 cleanup, cache_dataset_in_gpu, use_checkpointing,
-                use_tf32, use_benchmark, use_deterministic, spectral_loss,
+                use_tf32, use_benchmark, use_deterministic, spectral_loss, use_env_loss,
                 lr_scheduler, exp_decay_gamma, use_validation,
                 custom_pretrained, g_pretrained_path,
                 d_pretrained_path, multiple_gpu, training_gpu, use_warmup,

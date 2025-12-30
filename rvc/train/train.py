@@ -98,19 +98,21 @@ cleanup = strtobool(sys.argv[14])
 vocoder = sys.argv[15]
 architecture = sys.argv[16]
 optimizer_choice = sys.argv[17]
-use_checkpointing = strtobool(sys.argv[18])
-use_tf32 = bool(strtobool(sys.argv[19]))
-use_benchmark = bool(strtobool(sys.argv[20]))
-use_deterministic = bool(strtobool(sys.argv[21]))
-spectral_loss = sys.argv[22]
-lr_scheduler = sys.argv[23]
-exp_decay_gamma = float(sys.argv[24])
-use_validation = strtobool(sys.argv[25])
-use_kl_annealing = strtobool(sys.argv[26])
-kl_annealing_cycle_duration = int(sys.argv[27])
-vits2_mode = strtobool(sys.argv[28])
-use_custom_lr = strtobool(sys.argv[29])
-custom_lr_g, custom_lr_d = (float(sys.argv[30]), float(sys.argv[31])) if use_custom_lr else (None, None)
+adversarial_loss = sys.argv[18]
+use_checkpointing = strtobool(sys.argv[19])
+use_tf32 = bool(strtobool(sys.argv[20]))
+use_benchmark = bool(strtobool(sys.argv[21]))
+use_deterministic = bool(strtobool(sys.argv[22]))
+spectral_loss = sys.argv[23]
+use_env_loss = bool(strtobool(sys.argv[24]))
+lr_scheduler = sys.argv[25]
+exp_decay_gamma = float(sys.argv[26])
+use_validation = strtobool(sys.argv[27])
+use_kl_annealing = strtobool(sys.argv[28])
+kl_annealing_cycle_duration = int(sys.argv[29])
+vits2_mode = strtobool(sys.argv[30])
+use_custom_lr = strtobool(sys.argv[31])
+custom_lr_g, custom_lr_d = (float(sys.argv[32]), float(sys.argv[33])) if use_custom_lr else (None, None)
 assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
 
 # Parse command line arguments end region ===========================
@@ -135,20 +137,17 @@ elif config.train.fp16_run:
 else:
     train_dtype = torch.float32
 
-
 # Globals ( do not touch these. )
 global_step = 0
 warmup_completed = False
 from_scratch = False
 use_lr_scheduler = lr_scheduler != "none"
 
-
 # Torch backends config
 torch.backends.cuda.matmul.allow_tf32 = use_tf32
 torch.backends.cudnn.allow_tf32 = use_tf32
 torch.backends.cudnn.benchmark = use_benchmark
 torch.backends.cudnn.deterministic = use_deterministic
-
 
 # Globals ( tweakable )
 randomized = True
@@ -158,11 +157,11 @@ debug_shapes = False
 
 # EXPERIMENTAL
 c_stft = 21.0 # Seems close enough to multi-scale mel loss's magnitude, but needs more testing.
-adversarial_loss = "lsgan" # Supported adv losses: "lsgan" ( default rvc / vits ), "tprls" or "hinge"
+#adversarial_loss = "lsgan" # Supported adv losses: "lsgan" ( default rvc / vits ), "tprls" or "hinge"
 
-pretrain_preview = True
+pretrain_preview = True # Generates preview audio samples every 50 steps
 override_pretrain_lr = False
-new_pretrain_lr = 9e-5
+new_pretrain_lr = 5e-5
 
 ##################################################################
 
@@ -306,7 +305,7 @@ def get_d_model(config, vocoder, use_checkpointing):
             use_checkpointing=use_checkpointing,
             **dict(config.mrd)
         )
-    elif vocoder == "PCPH-GAN": # Potentially changed in future - Trial
+    elif vocoder == "PCPH-GAN":
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
         return MPD_MSD_MRD_Combined(
             config.model.use_spectral_norm,
@@ -717,6 +716,9 @@ def run(
         exp_decay_gamma,
         use_kl_annealing,
         kl_annealing_cycle_duration,
+        spectral_loss,
+        adversarial_loss,
+        use_env_loss,
     )
 
     # Initial setup
@@ -745,10 +747,8 @@ def run(
     # Spectral loss init
     if spectral_loss == "L1 Mel Loss":
         fn_spectral_loss = torch.nn.L1Loss()
-        print("    ██████  Spectral loss: Single-Scale (L1) Mel loss function")
     elif spectral_loss == "Multi-Scale Mel Loss":
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
-        print("    ██████  Spectral loss: Multi-Scale Mel loss function")
     elif spectral_loss == "Multi-Res STFT Loss":
         fn_spectral_loss = auraloss.freq.MultiResolutionSTFTLoss(
             fft_sizes = [1024, 2048, 4096],
@@ -761,7 +761,6 @@ def run(
             perceptual_weighting = True,
             device=device,
         )
-        print("    ██████  Spectral loss: Multi-Resolution STFT loss function")
     else:
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)
@@ -826,17 +825,6 @@ def run(
 
     # Cache for training with " cache " enabled
     cache = []
-
-    # GAN Loss debug
-    if adversarial_loss == "tprls":
-        print("------ GAN LOSS VARIANT: TPRLS ------")
-    elif adversarial_loss == "hinge":
-        print("------ GAN LOSS VARIANT: HINGE ------")
-    elif adversarial_loss == "lsgan":
-        print("------ GAN LOSS VARIANT: LSGAN ------")
-    else:
-        print(f"------ {adversarial_loss} LOSS VARIANT IS NOT SUPPORTED. Exiting .. ------")
-        sys.exit(1)
 
     for epoch in range(epoch_str, total_epoch_count + 1):
         training_loop(
@@ -980,8 +968,8 @@ def training_loop(
         # Tensors init for averaged losses:
         if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             tensor_count = 7
-        elif vocoder == "PCPH-GAN":
-            tensor_count = 8
+        elif vocoder == "PCPH-GAN" or use_env_loss:
+            tensor_count = 7
         else:
             tensor_count = 6
         epoch_loss_tensor = torch.zeros(tensor_count, device=device)
@@ -1003,7 +991,7 @@ def training_loop(
             "loss_sd_50": deque(maxlen=50),
         })
 
-    if vocoder in "PCPH-GAN":
+    if vocoder in "PCPH-GAN" or use_env_loss:
         avg_50_cache.update({
             "loss_env_50": deque(maxlen=50),
         })
@@ -1130,13 +1118,13 @@ def training_loop(
                     loss_phase = phase_loss(y_stft, y_hat_stft)
                     loss_sd = (loss_magnitude + loss_phase) * 0.7
 
-                if vocoder == "PCPH-GAN":
+                if vocoder == "PCPH-GAN" or use_env_loss:
                     loss_env = envelope_loss(y, y_hat)
 
                 # Total generator loss
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta + loss_sd
-                elif vocoder == "PCPH-GAN":
+                elif vocoder == "PCPH-GAN" or use_env_loss:
                     loss_gen_total = loss_adv + loss_fm + loss_mel + loss_env * 1.0 + loss_kl * kl_beta
                 else:
                     loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta
@@ -1173,7 +1161,7 @@ def training_loop(
                 epoch_loss_tensor[5].add_(loss_kl.detach())
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     epoch_loss_tensor[6].add_(loss_sd.detach())
-                if vocoder == "PCPH-GAN":
+                if vocoder == "PCPH-GAN" or use_env_loss:
                     epoch_loss_tensor[6].add_(loss_env.detach())
 
             # queue for rolling losses / grads over 50 steps
@@ -1189,7 +1177,7 @@ def training_loop(
             avg_50_cache["loss_kl_50"].append(loss_kl.detach())
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 avg_50_cache["loss_sd_50"].append(loss_sd.detach())
-            if vocoder == "PCPH-GAN":
+            if vocoder == "PCPH-GAN" or use_env_loss:
                 avg_50_cache["loss_env_50"].append(loss_env.detach())
 
             if rank == 0 and global_step % 50 == 0:
@@ -1236,7 +1224,7 @@ def training_loop(
                         "loss_avg_50/loss_sd_50": torch.mean(
                             torch.stack(list(avg_50_cache["loss_sd_50"]))),
                     })
-                if vocoder == "PCPH-GAN":
+                if vocoder == "PCPH-GAN" or use_env_loss:
                     scalar_dict_50.update({
                         # Losses:
                         "loss_avg_50/loss_env_50": torch.mean(
@@ -1333,7 +1321,7 @@ def training_loop(
                 scalar_dict_avg.update({
                     "loss_avg/loss_sd": avg_epoch_loss[6].item(),
                 })
-            if vocoder == "PCPH-GAN":
+            if vocoder == "PCPH-GAN" or use_env_loss:
                 scalar_dict_avg.update({
                     "loss_avg/loss_env": avg_epoch_loss[6].item(),
                 })
