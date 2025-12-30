@@ -75,7 +75,7 @@
 ` RingFormer and PCPH-GAN architectures utilize MPD, MSD and MRD Discs combo.`
  
 - Much better loss logging handling.
-`( Per-epoch-avg loss as the main one, over-50-steps-avg as the long-term / general tendency one )`
+`( Per-epoch-avg loss as the main one, over-50-steps rolling avg as the long-term one )`
  
 - More sophisticated dataset-preprocessing approach.
  
