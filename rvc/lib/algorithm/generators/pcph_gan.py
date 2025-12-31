@@ -126,8 +126,6 @@ class ResBlock(torch.nn.Module):
         self.convs1 = self._create_convs(channels, kernel_size, dilations)
         self.convs2 = self._create_convs(channels, kernel_size, [1] * len(dilations))
 
-        self.activation = SnakeBetaFused(channels)
-
         self.acts1 = nn.ModuleList([
             SnakeBetaFused(num_channels=channels, init=1.0, beta_init=1.0, log_scale=True) for _ in dilations])
         self.acts2 = nn.ModuleList([
