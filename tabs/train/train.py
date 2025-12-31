@@ -331,7 +331,7 @@ def train_tab():
                     key='architecture'
                 )
                 vits2_mode = gr.Checkbox(
-                    label="Enables VITS2 mode",
+                    label="Enable VITS2 modeㅤ( Requires compatible pretrains! )",
                     value=False,
                     interactive=True,
                     visible=True,
@@ -726,13 +726,6 @@ def train_tab():
                         interactive=True,
                         key='cleanup'
                     )
-                    cache_dataset_in_gpu = gr.Checkbox(
-                        label="Cache Dataset in GPU",
-                        info="Cache the dataset in GPU memory to speed up the training process. \n NOTE: It is advised to have it turned off! ",
-                        value=False,
-                        interactive=True,
-                        key='cache_dataset_in_gpu'
-                    )
                     use_checkpointing = gr.Checkbox(
                         label="Checkpointing",
                         info="Enables memory-efficient training. \n This reduces the vram usage in exchange for slower training speed.",
@@ -747,7 +740,6 @@ def train_tab():
                         interactive=True,
                         key='use_validation'
                     )
-                with gr.Column():
                     use_tf32 = gr.Checkbox(
                         label="use 'TF32' precision",
                         info="Uses TF32 precision instead of FP32, typically resulting in 30% to 100% faster training. \n**Requires min. RTX 30xx ( At least Ampere microarchitecture )**",
@@ -769,6 +761,7 @@ def train_tab():
                         interactive=True,
                         key='use_deterministic'
                     )
+                with gr.Column():
                     spectral_loss = gr.Radio(
                         label="Spectral loss",
                         info="- **L1 Mel Loss:** Standard L1 mel spectrogram loss - **Safe default.** \n- **Multi-Scale Mel Loss:** Mel spectrogram loss that utilizes multiple-scales - **Results vary.** \n- **Multi-Res STFT Loss:** STFT Spec. based loss that utilizes multiple-resolutions - **EXPERIMENTAL.** ",
@@ -819,6 +812,17 @@ def train_tab():
                         interactive=True,
                         visible=False,
                         key='kl_annealing_cycle_duration'
+                    )
+                    rolling_loss_steps = gr.Slider(
+                        3,
+                        1000,
+                        50,
+                        step=1,
+                        label="Rolling avg loss steps",
+                        info="Pick the interval ( in steps ) for rolling avg logging for losses and grad norms.",
+                        interactive=True,
+                        visible=True,
+                        key='rolling_loss_steps'
                     )
             with gr.Column():
                 custom_pretrained = gr.Checkbox(
@@ -970,7 +974,6 @@ def train_tab():
                     pretrained,
                     cleanup,
                     index_algorithm,
-                    cache_dataset_in_gpu,
                     custom_pretrained,
                     g_pretrained_path,
                     d_pretrained_path,
@@ -990,6 +993,7 @@ def train_tab():
                     use_kl_annealing,
                     kl_annealing_cycle_duration,
                     vits2_mode,
+                    rolling_loss_steps,
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
@@ -1199,7 +1203,7 @@ def train_tab():
                 # Training
                 batch_size, epoch_save_frequency, total_epoch_count,
                 save_only_latest_net_models, save_weight_models, pretrained,
-                cleanup, cache_dataset_in_gpu, use_checkpointing,
+                cleanup, use_checkpointing,
                 use_tf32, use_benchmark, use_deterministic, spectral_loss, use_env_loss,
                 lr_scheduler, exp_decay_gamma, use_validation,
                 custom_pretrained, g_pretrained_path,
@@ -1312,6 +1316,11 @@ def train_tab():
                 inputs=[pretrained, custom_pretrained],
                 outputs=[custom_pretrained, pretrained_custom_settings],
             )
+            # placeholder_trigger.change(
+                # fn=lambda value: {"visible": not value, "__type__": "update"},
+                # inputs=[placeholder_trigger], # element to be unchecked / disabled
+                # outputs=[placeholder_result] # element to appear to appear
+            # )
             custom_pretrained.change(
                 fn=toggle_visible,
                 inputs=[custom_pretrained],

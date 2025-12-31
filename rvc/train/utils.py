@@ -592,6 +592,7 @@ def print_init_setup(
     spectral_loss,
     adversarial_loss,
     use_env_loss,
+    vits2_mode,
 ):
     # Warmup init msg:
     if rank == 0:
@@ -642,6 +643,12 @@ def print_init_setup(
             print("    ██████  Adversarial loss: HINGE")
         elif adversarial_loss == "lsgan":
             print("    ██████  Adversarial loss: LSGAN")
+
+        # Vits maode checkup:
+        if vits2_mode:
+            print("    ██████  Vits mode: vits-based + few vits2 tweaks (Custom)")
+        else:
+            print("    ██████  Vits mode: vits-based (Default RVC)")
 
         # Envelope loss check:
         if use_env_loss:

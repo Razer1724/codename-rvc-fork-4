@@ -91,26 +91,26 @@ batch_size = int(sys.argv[7])
 sample_rate = int(sys.argv[8])
 save_only_latest_net_models = strtobool(sys.argv[9])
 save_weight_models = strtobool(sys.argv[10])
-cache_data_in_gpu = strtobool(sys.argv[11])
-use_warmup = strtobool(sys.argv[12])
-warmup_duration = int(sys.argv[13])
-cleanup = strtobool(sys.argv[14])
-vocoder = sys.argv[15]
-architecture = sys.argv[16]
-optimizer_choice = sys.argv[17]
-adversarial_loss = sys.argv[18]
-use_checkpointing = strtobool(sys.argv[19])
-use_tf32 = bool(strtobool(sys.argv[20]))
-use_benchmark = bool(strtobool(sys.argv[21]))
-use_deterministic = bool(strtobool(sys.argv[22]))
-spectral_loss = sys.argv[23]
-use_env_loss = bool(strtobool(sys.argv[24]))
-lr_scheduler = sys.argv[25]
-exp_decay_gamma = float(sys.argv[26])
-use_validation = strtobool(sys.argv[27])
-use_kl_annealing = strtobool(sys.argv[28])
-kl_annealing_cycle_duration = int(sys.argv[29])
-vits2_mode = strtobool(sys.argv[30])
+use_warmup = strtobool(sys.argv[11])
+warmup_duration = int(sys.argv[12])
+cleanup = strtobool(sys.argv[13])
+vocoder = sys.argv[14]
+architecture = sys.argv[15]
+optimizer_choice = sys.argv[16]
+adversarial_loss = sys.argv[17]
+use_checkpointing = strtobool(sys.argv[18])
+use_tf32 = bool(strtobool(sys.argv[19]))
+use_benchmark = bool(strtobool(sys.argv[20]))
+use_deterministic = bool(strtobool(sys.argv[21]))
+spectral_loss = sys.argv[22]
+use_env_loss = bool(strtobool(sys.argv[23]))
+lr_scheduler = sys.argv[24]
+exp_decay_gamma = float(sys.argv[25])
+use_validation = strtobool(sys.argv[26])
+use_kl_annealing = strtobool(sys.argv[27])
+kl_annealing_cycle_duration = int(sys.argv[28])
+vits2_mode = strtobool(sys.argv[29])
+rolling_loss_steps = int(sys.argv[30])
 use_custom_lr = strtobool(sys.argv[31])
 custom_lr_g, custom_lr_d = (float(sys.argv[32]), float(sys.argv[33])) if use_custom_lr else (None, None)
 assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
@@ -394,18 +394,14 @@ def get_optimizers(
         optim_d = AdamW_BF16(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d, kahan_sum=True, foreach=True)
 
     elif optimizer_choice == "RAdam":
-        optim_g = torch.optim.RAdam(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g)
-        optim_d = torch.optim.RAdam(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d)
+        from rvc.train.custom_optimizers.radam_foreach import RAdamForEach
+        optim_g = RAdamForEach(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g)
+        optim_d = RAdamForEach(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d)
 
     elif optimizer_choice == "DiffGrad":
         from rvc.train.custom_optimizers.diffgrad import diffgrad
         optim_g = diffgrad(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g)
         optim_d = diffgrad(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d)
-
-    elif optimizer_choice == "Prodigy":
-        from rvc.train.custom_optimizers.prodigy import Prodigy
-        optim_g = Prodigy(filter(lambda p: p.requires_grad, net_g.parameters()), lr=custom_lr_g if use_custom_lr else 1.0, betas=(0.8, 0.99), weight_decay=0.0, decouple=True)
-        optim_d = Prodigy(filter(lambda p: p.requires_grad, net_d.parameters()), lr=custom_lr_d if use_custom_lr else 1.0, betas=(0.8, 0.99), weight_decay=0.0, decouple=True)
 
     elif optimizer_choice == "Ranger21":
         from rvc.train.custom_optimizers.ranger21 import Ranger21
@@ -719,6 +715,7 @@ def run(
         spectral_loss,
         adversarial_loss,
         use_env_loss,
+        vits2_mode,
     )
 
     # Initial setup
@@ -943,18 +940,7 @@ def training_loop(
     net_g.train()
     net_d.train()
 
-    # Data caching
-    if device.type == "cuda" and cache_data_in_gpu:
-        data_iterator = cache
-        if cache == []:
-            for batch_idx, info in enumerate(train_loader):
-                # phone, phone_lengths, pitch, pitchf, spec, spec_lengths, y, y_lengths, sid
-                info = [tensor.cuda(device_id, non_blocking=True) for tensor in info]
-                cache.append((batch_idx, info))
-        else:
-            shuffle(cache)
-    else:
-        data_iterator = enumerate(train_loader)
+    data_iterator = enumerate(train_loader)
 
     epoch_recorder = EpochRecorder()
 
@@ -975,26 +961,21 @@ def training_loop(
         epoch_loss_tensor = torch.zeros(tensor_count, device=device)
         num_batches_in_epoch = 0
 
-    avg_50_cache = {
-        "grad_norm_d_50": deque(maxlen=50),
-        "grad_norm_g_50": deque(maxlen=50),
-        "loss_disc_50": deque(maxlen=50),
-        "loss_adv_50": deque(maxlen=50),
-        "loss_gen_total_50": deque(maxlen=50),
-        "loss_fm_50": deque(maxlen=50),
-        "loss_mel_50": deque(maxlen=50),
-        "loss_kl_50": deque(maxlen=50),
-
+    avg_rolling_cache = {
+        "grad_norm_d": deque(maxlen=rolling_loss_steps),
+        "grad_norm_g": deque(maxlen=rolling_loss_steps),
+        "loss_disc": deque(maxlen=rolling_loss_steps),
+        "loss_adv": deque(maxlen=rolling_loss_steps),
+        "loss_gen_total": deque(maxlen=rolling_loss_steps),
+        "loss_fm": deque(maxlen=rolling_loss_steps),
+        "loss_mel": deque(maxlen=rolling_loss_steps),
+        "loss_kl": deque(maxlen=rolling_loss_steps),
     }
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-        avg_50_cache.update({
-            "loss_sd_50": deque(maxlen=50),
-        })
+        avg_rolling_cache["loss_sd"] = deque(maxlen=rolling_loss_steps)
 
-    if vocoder in "PCPH-GAN" or use_env_loss:
-        avg_50_cache.update({
-            "loss_env_50": deque(maxlen=50),
-        })
+    if vocoder == "PCPH-GAN" or use_env_loss:
+        avg_rolling_cache["loss_env"] = deque(maxlen=rolling_loss_steps)
 
     use_amp = (config.train.bf16_run or config.train.fp16_run) and device.type == "cuda"
 
@@ -1006,7 +987,7 @@ def training_loop(
             if not from_scratch:
                 num_batches_in_epoch += 1
 
-            if device.type == "cuda" and not cache_data_in_gpu:
+            if device.type == "cuda":
                 info = [tensor.cuda(device_id, non_blocking=True) for tensor in info]
             elif device.type != "cuda":
                 info = [tensor.to(device) for tensor in info]
@@ -1152,7 +1133,7 @@ def training_loop(
                     scheduler_g.step()
 
             if not from_scratch:
-                # Loss accumulation In the epoch_loss_tensor
+                # Loss accumulation for epoch-avg
                 epoch_loss_tensor[0].add_(loss_disc.detach())
                 epoch_loss_tensor[1].add_(loss_adv.detach())
                 epoch_loss_tensor[2].add_(loss_gen_total.detach())
@@ -1164,74 +1145,42 @@ def training_loop(
                 if vocoder == "PCPH-GAN" or use_env_loss:
                     epoch_loss_tensor[6].add_(loss_env.detach())
 
-            # queue for rolling losses / grads over 50 steps
+            # Loss accumulation for rolling-avg
             # Grads:
-            avg_50_cache["grad_norm_d_50"].append(grad_norm_d)
-            avg_50_cache["grad_norm_g_50"].append(grad_norm_g)
+            avg_rolling_cache["grad_norm_d"].append(grad_norm_d)
+            avg_rolling_cache["grad_norm_g"].append(grad_norm_g)
             # Losses:
-            avg_50_cache["loss_disc_50"].append(loss_disc.detach())
-            avg_50_cache["loss_adv_50"].append(loss_adv.detach())
-            avg_50_cache["loss_gen_total_50"].append(loss_gen_total.detach())
-            avg_50_cache["loss_fm_50"].append(loss_fm.detach())
-            avg_50_cache["loss_mel_50"].append(loss_mel.detach())
-            avg_50_cache["loss_kl_50"].append(loss_kl.detach())
-            if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                avg_50_cache["loss_sd_50"].append(loss_sd.detach())
-            if vocoder == "PCPH-GAN" or use_env_loss:
-                avg_50_cache["loss_env_50"].append(loss_env.detach())
+            avg_rolling_cache["loss_disc"].append(loss_disc.detach())
+            avg_rolling_cache["loss_adv"].append(loss_adv.detach()) 
+            avg_rolling_cache["loss_gen_total"].append(loss_gen_total.detach())
+            avg_rolling_cache["loss_fm"].append(loss_fm.detach())
+            avg_rolling_cache["loss_mel"].append(loss_mel.detach())
+            avg_rolling_cache["loss_kl"].append(loss_kl.detach())
+            if "loss_sd" in avg_rolling_cache:
+                avg_rolling_cache["loss_sd"].append(loss_sd.detach())
+            if "loss_env" in avg_rolling_cache:
+                avg_rolling_cache["loss_env"].append(loss_env.detach())
 
-            if rank == 0 and global_step % 50 == 0:
-                scalar_dict_50 = {}
-                # Learning rate retrieval for avg-50 variation:
+            if rank == 0 and global_step % rolling_loss_steps == 0:
+                scalar_dict_rolling = {}
+                # Learning rate retrieval for rolling logging
                 if from_scratch:
-                    lr_d = optim_d.param_groups[0]["lr"]
-                    lr_g = optim_g.param_groups[0]["lr"]
-                    scalar_dict_50.update({
-                    "learning_rate/lr_d": lr_d,
-                    "learning_rate/lr_g": lr_g,
-                    })
-                if optimizer_choice == "Prodigy":
-                    prodigy_lr_g = optim_g.param_groups[0].get('d', 0)
-                    prodigy_lr_d = optim_d.param_groups[0].get('d', 0)
-                    scalar_dict_50.update({
-                        "learning_rate/prodigy_lr_g": prodigy_lr_g,
-                        "learning_rate/prodigy_lr_d": prodigy_lr_d,
+                    scalar_dict_rolling.update({
+                        "learning_rate/lr_d": optim_d.param_groups[0]["lr"],
+                        "learning_rate/lr_g": optim_g.param_groups[0]["lr"],
                     })
                 # logging rolling averages
-                scalar_dict_50.update({
-                    # Grads:
-                    "grad_avg_50/norm_d_50": sum(avg_50_cache["grad_norm_d_50"])
-                    / len(avg_50_cache["grad_norm_d_50"]),
-                    "grad_avg_50/norm_g_50": sum(avg_50_cache["grad_norm_g_50"])
-                    / len(avg_50_cache["grad_norm_g_50"]),
-                    # Losses:
-                    "loss_avg_50/loss_disc_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_disc_50"]))).item(),
-                    "loss_avg_50/loss_adv_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_adv_50"]))).item(),
-                    "loss_avg_50/loss_gen_total_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_gen_total_50"]))).item(),
-                    "loss_avg_50/loss_fm_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_fm_50"]))).item(),
-                    "loss_avg_50/loss_mel_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_mel_50"]))).item(),
-                    "loss_avg_50/loss_kl_50": torch.mean(
-                        torch.stack(list(avg_50_cache["loss_kl_50"]))).item(),
-                })
-                if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                    scalar_dict_50.update({
-                        # Losses:
-                        "loss_avg_50/loss_sd_50": torch.mean(
-                            torch.stack(list(avg_50_cache["loss_sd_50"]))),
-                    })
-                if vocoder == "PCPH-GAN" or use_env_loss:
-                    scalar_dict_50.update({
-                        # Losses:
-                        "loss_avg_50/loss_env_50": torch.mean(
-                            torch.stack(list(avg_50_cache["loss_env_50"]))),
-                    })
+                for key, queue in avg_rolling_cache.items():
+                    if len(queue) > 0:
+                        # determine loss or grad category
+                        category = "loss" if "loss" in key else "grad"
+                        # dynamic labeling
+                        label = f"{category}_avg_{rolling_loss_steps}/{key}_{rolling_loss_steps}"
+                        # Calculate mean
+                        val = torch.stack(list(queue)).mean().item() if torch.is_tensor(queue[0]) else sum(queue)/len(queue)
+                        scalar_dict_rolling[label] = val
 
-                summarize(writer=writer, global_step=global_step, scalars=scalar_dict_50)
+                summarize(writer=writer, global_step=global_step, scalars=scalar_dict_rolling)
                 flush_writer(writer, rank)
 
             if from_scratch and pretrain_preview and rank == 0 and global_step % 50 == 0:
@@ -1310,22 +1259,10 @@ def training_loop(
             "learning_rate/lr_d": lr_d,
             "learning_rate/lr_g": lr_g,
             }
-            if optimizer_choice == "Prodigy":
-                prodigy_lr_g = optim_g.param_groups[0].get('d', 0)
-                prodigy_lr_d = optim_d.param_groups[0].get('d', 0)
-                scalar_dict_avg.update({
-                    "learning_rate/prodigy_lr_g": prodigy_lr_g,
-                    "learning_rate/prodigy_lr_d": prodigy_lr_d,
-                })
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                scalar_dict_avg.update({
-                    "loss_avg/loss_sd": avg_epoch_loss[6].item(),
-                })
+                scalar_dict_avg.update({"loss_avg/loss_sd": avg_epoch_loss[6].item()})
             if vocoder == "PCPH-GAN" or use_env_loss:
-                scalar_dict_avg.update({
-                    "loss_avg/loss_env": avg_epoch_loss[6].item(),
-                })
-
+                scalar_dict_avg.update({"loss_avg/loss_env": avg_epoch_loss[6].item()})
 
             summarize(writer=writer, global_step=global_step, scalars=scalar_dict_avg)
             flush_writer(writer, rank)

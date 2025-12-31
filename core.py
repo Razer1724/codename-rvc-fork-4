@@ -522,7 +522,6 @@ def run_train_script(
     pretrained: bool,
     cleanup: bool,
     index_algorithm: str = "Auto",
-    cache_data_in_gpu: bool = False,
     custom_pretrained: bool = False,
     g_pretrained_path: str = None,
     d_pretrained_path: str = None,
@@ -542,6 +541,7 @@ def run_train_script(
     use_kl_annealing: bool = False,
     kl_annealing_cycle_duration: int = 3,
     vits2_mode: bool = False,
+    rolling_loss_steps: int = 50,
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
@@ -582,7 +582,6 @@ def run_train_script(
                 sample_rate,
                 save_only_latest_net_models,
                 save_weight_models,
-                cache_data_in_gpu,
                 use_warmup,
                 warmup_duration,
                 cleanup,
@@ -602,6 +601,7 @@ def run_train_script(
                 use_kl_annealing,
                 kl_annealing_cycle_duration,
                 vits2_mode,
+                rolling_loss_steps,
                 use_custom_lr,
                 custom_lr_g,
                 custom_lr_d
@@ -2285,6 +2285,12 @@ def parse_arguments():
         default=False,
     )
     train_parser.add_argument(
+        "--rolling_loss_steps",
+        type=int,
+        help="interval for rolling avg loss (in steps).",
+        default=50,
+    )
+    train_parser.add_argument(
         "--use_custom_lr",
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
@@ -2296,13 +2302,6 @@ def parse_arguments():
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
         help="Cleanup previous training attempt.",
-        default=False,
-    )
-    train_parser.add_argument(
-        "--cache_data_in_gpu",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Cache training data in GPU memory.",
         default=False,
     )
     train_parser.add_argument(
@@ -2619,7 +2618,6 @@ def main():
                 custom_pretrained=args.custom_pretrained,
                 cleanup=args.cleanup,
                 index_algorithm=args.index_algorithm,
-                cache_data_in_gpu=args.cache_data_in_gpu,
                 g_pretrained_path=args.g_pretrained_path,
                 d_pretrained_path=args.d_pretrained_path,
                 vocoder=args.vocoder,
@@ -2635,6 +2633,8 @@ def main():
                 lr_scheduler=args.lr_scheduler,
                 exp_decay_gamma=args.exp_decay_gamma,
                 use_validation=args.use_validation,
+                vits2_mode=args.vits2_mode,
+                rolling_loss_steps=args.rolling_loss_steps,
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,
