@@ -219,6 +219,7 @@ class VoiceConverter:
         resample_sr: int = 0,
         sid: int = 0,
         seed: int = 0,
+        uvmp_submodel: str = None,
         **kwargs,
     ):
         """
@@ -252,7 +253,7 @@ class VoiceConverter:
             print("No model provided. Aborting conversion.")
             return
 
-        self.get_vc(model_path, sid)
+        self.get_vc(model_path, sid, uvmp_submodel)
         
         if not self.vc:
             print("Voice conversion pipeline not initialized. Check for model loading errors in the logs. Aborting conversion.")
@@ -300,7 +301,7 @@ class VoiceConverter:
                 audio_opt = self.vc.pipeline(
                     model=self.hubert_model,
                     net_g=self.net_g,
-                    sid=0,
+                    sid=sid,
                     audio=c,
                     pitch=pitch,
                     f0_method=f0_method,
@@ -423,7 +424,7 @@ class VoiceConverter:
             if os.path.exists(os.path.join(now_dir, "assets", "infer_pid.txt")):
                 os.remove(os.path.join(now_dir, "assets", "infer_pid.txt"))
 
-    def get_vc(self, weight_root, sid):
+    def get_vc(self, weight_root, sid, uvmp_submodel=None):
         """
         Loads the voice conversion model and sets up the pipeline.
 
@@ -439,25 +440,25 @@ class VoiceConverter:
 
         if not self.loaded_model or self.loaded_model != weight_root:
             self.load_model(weight_root)
-        
-        # Handle model selection from multi-model .uvmp files
-        if self.cpt and self.cpt.get("models"):
-            if sid in self.cpt["models"]:
-                model_data = self.cpt["models"][sid]
+
+        if self.cpt and isinstance(self.cpt, dict) and "models" in self.cpt:
+            target_key = uvmp_submodel
+
+            if target_key and target_key in self.cpt["models"]:
+                model_data = self.cpt["models"][target_key]
                 self.active_cpt = model_data["model_state"]
-                
+
                 self.loaded_index = None
                 if "index_data" in model_data:
                     try:
                         self.loaded_index = faiss.deserialize_index(model_data["index_data"])
-                        print(f"[Infer] Loaded index for speaker '{sid}' from .uvmp file.")
                     except Exception as e:
-                        print(f"Failed to deserialize index for speaker '{sid}': {e}")
+                        print(f"Failed to deserialize index: {e}")
             else:
-                print(f"Speaker ID '{sid}' not found in the .uvmp file.")
+                print(f"Sub-model '{uvmp_submodel}' not found in the .uvmp file.")
                 self.cleanup_model()
                 return
-        else: # For .pth or single-model .uvmp
+        else:
             self.active_cpt = self.cpt
 
         if self.active_cpt is not None:
@@ -467,7 +468,6 @@ class VoiceConverter:
         else:
             self.vc = None
             self.loaded_model = None
-
 
     def cleanup_model(self):
         """

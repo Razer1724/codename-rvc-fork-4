@@ -280,23 +280,30 @@ def delete_outputs():
             if name.endswith(tuple(sup_audioext)) and name.__contains__("_output"):
                 os.remove(os.path.join(root, name))
 
-
 def match_index(model_file_value):
-    if model_file_value and model_file_value.endswith(".uvmp"):
+    if not model_file_value or model_file_value.endswith(".uvmp"):
         return ""
-    if model_file_value:
-        model_folder = os.path.dirname(model_file_value)
-        model_name = os.path.basename(model_file_value)
-        index_files = get_indexes()
-        pattern = r"^(.*?)_"
-        match = re.match(pattern, model_name)
-        for index_file in index_files:
-            if os.path.dirname(index_file) == model_folder:
-                return index_file
-            elif match and match.group(1) in os.path.basename(index_file):
-                return index_file
-            elif model_name in os.path.basename(index_file):
-                return index_file
+
+    model_dir = os.path.dirname(model_file_value)
+    if not os.path.exists(model_dir):
+        return ""
+
+    try:
+        files_in_dir = os.listdir(model_dir)
+        index_files = [f for f in files_in_dir if f.endswith(".index")]
+    except:
+        return ""
+
+    if not index_files:
+        return ""
+
+    model_name = os.path.basename(model_file_value)
+    model_base = os.path.splitext(model_name)[0]
+    core_name = model_base.split('_')[0]
+
+    for index_file in index_files:
+        if core_name.lower() in index_file.lower():
+            return os.path.join(model_dir, index_file)
     return ""
 
 
@@ -336,7 +343,7 @@ def refresh_embedders_folders():
     ]
     return custom_embedders
 
-def get_speakers_id(model):
+def get_speakers_id(model, sub_model_name=None):
     if not model or not os.path.exists(os.path.join(now_dir, model)):
         return [0]
     try:
@@ -347,14 +354,22 @@ def get_speakers_id(model):
                     decompressed_data = reader.read()
             buffer = io.BytesIO(decompressed_data)
             model_data = torch.load(buffer, map_location="cpu", weights_only=False)
-            
+
             if "models" in model_data:
-                return sorted(list(model_data["models"].keys()))
-            else: # Backwards compatibility for single-model .uvmp
+                if sub_model_name and sub_model_name in model_data["models"]:
+                    sub_data = model_data["models"][sub_model_name]["model_state"]
+                    speakers_id = sub_data.get("speakers_id")
+                    if speakers_id:
+                        return list(range(speakers_id))
                 return [0]
+            else:
+                if "model_state" in model_data:
+                     speakers_id = model_data["model_state"].get("speakers_id")
+                else:
+                     speakers_id = model_data.get("speakers_id")
         else:
             model_data = torch.load(os.path.join(now_dir, model), map_location="cpu", weights_only=True)
-        
+
         speakers_id = model_data.get("speakers_id")
         if speakers_id:
             return list(range(speakers_id))
@@ -364,6 +379,26 @@ def get_speakers_id(model):
         print(f"Error loading model to get speaker IDs: {e}")
         return [0]
 
+def get_uvmp_models(model):
+    """
+    Returns a list of model keys if the file is a multi-model .uvmp, else empty list.
+    """
+    if not model or not model.endswith(".uvmp") or not os.path.exists(os.path.join(now_dir, model)):
+        return []
+    try:
+        with open(os.path.join(now_dir, model), 'rb') as f_comp:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(f_comp) as reader:
+                decompressed_data = reader.read()
+        buffer = io.BytesIO(decompressed_data)
+        model_data = torch.load(buffer, map_location="cpu", weights_only=False)
+
+        if "models" in model_data:
+            return sorted(list(model_data["models"].keys()))
+        return []
+    except Exception as e:
+        print(f"Error checking UVMP models: {e}")
+        return []
 
 # Inference tab
 def inference_tab():
@@ -377,7 +412,14 @@ def inference_tab():
                 value=default_weight,
                 allow_custom_value=True,
             )
-
+            uvmp_submodel = gr.Dropdown(
+                label="UVMP Sub-Model",
+                info="Select the sub-model from the UVMP bundle.",
+                choices=[],
+                value=None,
+                interactive=True,
+                visible=False
+            )
             index_file = gr.Dropdown(
                 label="Index File",
                 info="Select the index file. Disabled if a .uvmp model is selected.",
@@ -401,38 +443,41 @@ def inference_tab():
 
         def on_model_change(model_path):
             """
-            Handles UI changes when a .uvmp voice model is selected.
+            Handles UI changes for .pth and .uvmp voice model selection.
             """
-            is_uvmp = model_path and model_path.endswith(".uvmp")
-            speakers = get_speakers_id(model_path)
-            speaker_val = speakers[0] if speakers else 0
+            uvmp_models = get_uvmp_models(model_path)
 
-            if is_uvmp:
-                # .uvmp selected: Repurpose index_file for speaker ID, hide original sid
+            if uvmp_models:
                 return (
-                    gr.update(
-                        label="Speaker ID",
-                        info="Select the speaker ID for the .uvmp model.",
-                        choices=speakers,
-                        value=speaker_val,
-                        interactive=True,
-                        visible=True,
-                    ),
-                    gr.update(visible=False, value=speaker_val, choices=speakers),
+                    gr.update(visible=False, value=""),
+                    gr.update(choices=[0], value=0, visible=True),
+                    gr.update(visible=True, choices=uvmp_models, value=uvmp_models[0])
                 )
             else:
-                # .pth selected: Restore index_file and show original sid
+                # Normal .pth or single .uvmp
+                speakers = get_speakers_id(model_path)
+                speaker_val = speakers[0] if speakers else 0
+                is_uvmp = model_path and model_path.endswith(".uvmp")
+
                 return (
                     gr.update(
-                        label="Index File",
-                        info="Select the index file. Disabled if a .uvmp model is selected.",
                         choices=get_indexes(),
-                        value=match_index(model_path),
-                        interactive=True,
+                        value=match_index(model_path) if not is_uvmp else "",
+                        interactive=not is_uvmp,
                         visible=True,
                     ),
-                    gr.update(visible=True, choices=speakers, value=speaker_val, interactive=True),
+                    gr.update(visible=True, choices=speakers, value=speaker_val),
+                    gr.update(visible=False, choices=[], value=None)
                 )
+
+        def on_submodel_change(model_path, sub_model_name):
+            if not model_path or not sub_model_name:
+                return gr.update(choices=[0], value=0)
+            
+            speakers = get_speakers_id(model_path, sub_model_name)
+            speaker_val = speakers[0] if speakers else 0
+            return gr.update(choices=speakers, value=speaker_val)
+
             
         def sync_speaker_id(model_path, repurposed_index_value):
             if model_path and model_path.endswith(".uvmp"):
@@ -1691,9 +1736,13 @@ def inference_tab():
     model_file.change(
         fn=on_model_change,
         inputs=[model_file],
-        outputs=[index_file, sid],
+        outputs=[index_file, sid, uvmp_submodel],
     )
-
+    uvmp_submodel.change(
+        fn=on_submodel_change,
+        inputs=[model_file, uvmp_submodel],
+        outputs=[sid]
+    )
     index_file.change(
         fn=sync_speaker_id,
         inputs=[model_file, index_file],
@@ -2060,6 +2109,7 @@ def inference_tab():
             delay_mix,
             sid,
             seed,
+            uvmp_submodel,
         ],
         outputs=[vc_output1, vc_output2],
     )

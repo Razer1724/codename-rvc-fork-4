@@ -119,6 +119,7 @@ def run_infer_script(
     delay_mix: float = 0.5,
     sid: int = 0,
     seed: int = 0,
+    uvmp_submodel: str = None,
 ):
     kwargs = {
         "audio_input_path": input_path,
@@ -183,6 +184,7 @@ def run_infer_script(
         "delay_mix": delay_mix,
         "sid": sid,
         "seed": seed,
+        "uvmp_submodel": uvmp_submodel,
     }
     infer_pipeline = import_voice_converter()
     infer_pipeline.convert_audio(

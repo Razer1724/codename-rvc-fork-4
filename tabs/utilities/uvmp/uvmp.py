@@ -7,7 +7,7 @@ import zstandard as zstd
 import os
 import shutil
 
-def run_create_uvmp_script(pth_files, index_files, output_path):
+def run_create_uvmp_script(pth_files, index_files, output_path, use_single_index, comp_level):
     """Wrapper function to run the uvmp creation from the Gradio interface."""
     if not pth_files:
         return "Error: At least one .pth file is required."
@@ -18,7 +18,7 @@ def run_create_uvmp_script(pth_files, index_files, output_path):
 
         output_path = output_path if output_path else None
 
-        return create_uvmp(pth_paths, index_paths, output_path)
+        return create_uvmp(pth_paths, index_paths, output_path, use_single_index, int(comp_level))
     except Exception as e:
         return f"An unexpected error occurred: {e}\n{traceback.format_exc()}"
 
@@ -33,7 +33,7 @@ def uvmp_tab():
 
             - Upload one or more `.pth` files and optionally their corresponding `.index` files. 
             - **For multi-model packages,** Speaker Names are derived from the .pth filenames (e.g., `speaker_a.pth` becomes speaker `speaker_a`).
-            - If you provide `.index` files, their filenames must match their corresponding `.pth` file's name (e.g., `model_a.pth` and `model_a.index`).
+            - If you provide `.index` files, their filenames must match their corresponding `.pth` file's name (e.g., `model_a.pth` and `model_a.index`), UNLESS you use the Single Index Controller.
             """
         )
         pth_input = gr.File(
@@ -46,6 +46,20 @@ def uvmp_tab():
             file_types=[".index"],
             file_count="multiple",
         )
+        with gr.Row():
+            use_single_index_checkbox = gr.Checkbox(
+                label="Single Index Controller",
+                info="Bind 1 uploaded index to ALL models.",
+                value=False
+            )
+            compression_slider = gr.Slider(
+                minimum=1, 
+                maximum=22, 
+                step=1, 
+                value=3, 
+                label="Zstd Compression Level",
+                info="3 is Standard."
+            )
         output_path_input = gr.Textbox(
             label="Output File Path",
             info="If left blank, the .uvmp file will be saved in the 'logs' folder with the name inherited from the first .pth file. \n You can also provide only path or path + filename. ( see example below. ) ",
@@ -54,29 +68,39 @@ def uvmp_tab():
         )
         uvmp_output_info = gr.Textbox(
             label="Output Information",
-            info="The result of the operation will be displayed here.",
+            info="Log of operations:",
             value="",
-            max_lines=8,
+            max_lines=10,
             interactive=False,
         )
         uvmp_create_button = gr.Button("Create UVMP File")
 
         uvmp_create_button.click(
             fn=run_create_uvmp_script,
-            inputs=[pth_input, index_input, output_path_input],
+            inputs=[pth_input, index_input, output_path_input, use_single_index_checkbox, compression_slider],
             outputs=[uvmp_output_info],
         )
 
 
-def create_uvmp(pth_paths, index_paths=None, output_path=None):
+def create_uvmp(pth_paths, index_paths=None, output_path=None, use_single_index=False, comp_level=3):
     """
     Create a Zstandard-compressed .uvmp file from .pth and .index files.
-    
-    Speaker names are assigned based on the filename of the .pth files.
     """
     try:
         models_data = {}
         index_paths_dict = {Path(p).stem: p for p in index_paths} if index_paths else {}
+        log_messages = []
+
+        single_serialized_index = None
+        if use_single_index:
+            if not index_paths or len(index_paths) != 1:
+                return "Error: 'Single Index Controller' requires exactly one uploaded .index file."
+            try:
+                log_messages.append(f"Processing Single Index: {Path(index_paths[0]).name}")
+                index_obj = faiss.read_index(index_paths[0])
+                single_serialized_index = faiss.serialize_index(index_obj)
+            except Exception as e:
+                return f"Error processing single index file: {e}"
 
         for pth_path in pth_paths:
             if not Path(pth_path).exists():
@@ -88,30 +112,37 @@ def create_uvmp(pth_paths, index_paths=None, output_path=None):
             pth_data = torch.load(pth_path, map_location="cpu", weights_only=True)
             model_entry = {"model_state": pth_data}
 
-            if pth_file_stem in index_paths_dict:
-                index_path = index_paths_dict[pth_file_stem]
-                if not Path(index_path).exists():
-                    return f"Error: Matching index file not found for {pth_file_stem}.pth at path: {index_path}"
-
-                index = faiss.read_index(index_path)
-                model_entry["index_data"] = faiss.serialize_index(index)
+            if use_single_index:
+                model_entry["index_data"] = single_serialized_index
+                log_messages.append(f"| SUCCESS | {speaker_name}: Attached Single Index")
+            else:
+                if pth_file_stem in index_paths_dict:
+                    index_path = index_paths_dict[pth_file_stem]
+                    if Path(index_path).exists():
+                        index = faiss.read_index(index_path)
+                        model_entry["index_data"] = faiss.serialize_index(index)
+                        log_messages.append(f"| SUCCESS | {speaker_name}: Found matching index ({Path(index_path).name})")
+                    else:
+                        log_messages.append(f"| FAILURE | {speaker_name}: Matched index file missing on disk.")
+                else:
+                    log_messages.append(f"| NOTICE | {speaker_name}: No matching .index file found (Weights Only).")
 
             models_data[speaker_name] = model_entry
 
         uvmp_data = {"models": models_data}
         first_pth_stem = Path(pth_paths[0]).stem
-        
+
         project_root = Path(__file__).resolve().parent.parent.parent.parent
         logs_dir = project_root / "logs"
 
         if output_path:
-            # Check if the output_path is a simple filename without a directory component
             if '/' not in output_path and '\\' not in output_path:
                 final_output_path = logs_dir / output_path
             else:
                 final_output_path = Path(output_path).resolve()
 
             if final_output_path.is_dir() or not final_output_path.suffix:
+                final_output_path.mkdir(parents=True, exist_ok=True)
                 final_output_path = final_output_path / f"{first_pth_stem}.uvmp"
             elif final_output_path.suffix != ".uvmp":
                 final_output_path = final_output_path.with_suffix(".uvmp")
@@ -126,12 +157,15 @@ def create_uvmp(pth_paths, index_paths=None, output_path=None):
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_output_path = temp_dir / final_output_path.name
 
-        with zstd.open(temp_output_path, 'wb') as f:
+        log_messages.append(f"Compressing to {final_output_path.name} (Level {comp_level})...")
+        cctx = zstd.ZstdCompressor(level=comp_level)
+        with zstd.open(temp_output_path, 'wb', cctx=cctx) as f:
             torch.save(uvmp_data, f)
 
         shutil.move(str(temp_output_path), str(final_output_path))
 
-        return f"Successfully created uvmp file with {len(pth_paths)} model(s): {final_output_path}"
+        log_str = "\n".join(log_messages)
+        return f"Success!\nSaved to: {final_output_path}\n\nDetails:\n{log_str}"
 
     except Exception as e:
         return f"An error occurred during uvmp creation: {e}\n{traceback.format_exc()}"
