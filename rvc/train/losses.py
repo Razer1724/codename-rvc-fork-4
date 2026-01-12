@@ -37,38 +37,6 @@ def feature_loss(fmap_r, fmap_g):
     )
 
 
-def feature_loss_mask(fmap_r, fmap_g, silence_mask=None, reduce=True):
-    """
-    Silence-aware feature matching loss.
-    If silence_mask is provided, applies it per sample to reduce loss contribution.
-
-    Args:
-        fmap_r (List[List[Tensor]]): Feature maps from real audio
-        fmap_g (List[List[Tensor]]): Feature maps from generated audio
-        silence_mask (Tensor or None): Tensor of shape [B], 1 for voiced, 0 for silence
-        reduce (bool): Whether to return mean or per-sample loss
-    Returns:
-        Scalar loss or per-sample tensor
-    """
-    losses = []
-
-    for dr, dg in zip(fmap_r, fmap_g):  # across discriminators
-        for rl, gl in zip(dr, dg):      # across layers
-            diff = torch.abs(rl - gl)
-            per_sample = diff.view(diff.shape[0], -1).mean(dim=1)  # [B]
-            losses.append(per_sample)
-
-    total = torch.stack(losses, dim=0).mean(dim=0)  # mean over layers → [B]
-
-    if silence_mask is not None:
-        total = total * silence_mask  # scale loss per sample
-
-    if reduce:
-        return total.sum() / (silence_mask.sum() + 1e-6 if silence_mask is not None else total.numel())
-    else:
-        return total  # shape [B]
-
-
 def discriminator_loss(disc_real_outputs, disc_generated_outputs):
     """
     Compute the discriminator loss for real and generated outputs.

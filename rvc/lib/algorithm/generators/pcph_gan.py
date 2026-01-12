@@ -367,7 +367,6 @@ class PCPH_GAN_Generator(nn.Module):
 
         # Initial feats conv, projection: 192 -> 512
         self.conv_pre = Conv1d(initial_channel, upsample_initial_channel, 7, 1, padding=3)
-        #self.conv_pre = weight_norm(Conv1d(initial_channel, upsample_initial_channel, 7, 1, padding=3)) # Weight Norm, not applicable in this arcg.
 
         # Module containers init
         self.ups = nn.ModuleList()
@@ -378,7 +377,6 @@ class PCPH_GAN_Generator(nn.Module):
         ch = upsample_initial_channel # 512
 
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
-
             # 512:  256 --> 128 --> 64 --> 32
             ch //= 2
 
@@ -398,12 +396,11 @@ class PCPH_GAN_Generator(nn.Module):
                 # Projecting 1 channel -> ch channels
                 self.har_convs.append(Conv1d(1, ch, kernel_size=1))
 
-        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3, bias=False)) # Weight Norm
+        # Post convolution
+        self.conv_post = Conv1d(ch, 1, 7, 1, padding=3, bias=False)
 
         # init weights
-        #self.conv_pre.apply(init_weights) # Legacy, not needed in this architecture. IGNORE.
         self.ups.apply(init_weights)
-        self.conv_post.apply(init_weights)
 
         # embedding / spk conditioning layer
         if gin_channels != 0:
@@ -464,10 +461,6 @@ class PCPH_GAN_Generator(nn.Module):
         # ResBlocks
         for l in self.resblocks:
             l.remove_weight_norm()
-        # Pre Convolution
-        #remove_weight_norm(self.conv_pre)
-        # Post Convolution
-        remove_weight_norm(self.conv_post)
 
     def __prepare_scriptable__(self):
         # Upsamplers
@@ -486,58 +479,5 @@ class PCPH_GAN_Generator(nn.Module):
                     and hook.__class__.__name__ == "WeightNorm"
                 ):
                     remove_weight_norm(l)
-        # conv_pre
-        # for hook in self.conv_pre._forward_pre_hooks.values():
-            # if (
-                # hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
-                # and hook.__class__.__name__ == "WeightNorm"
-            # ):
-                # remove_weight_norm(self.conv_pre)
-
-        # conv_post
-        for hook in self.conv_post._forward_pre_hooks.values():
-            if (
-                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
-                and hook.__class__.__name__ == "WeightNorm"
-            ):
-                remove_weight_norm(self.conv_post)
 
         return self
-
-
-
-
-# def debug_inplace_safety():
-    # model = PCPH_GAN_Generator(
-        # initial_channel=192,
-        # resblock_kernel_sizes=[3, 7, 11],
-        # resblock_dilation_sizes=[[1, 3, 5], [[1, 3, 5], [[1, 3, 5]],
-        # upsample_rates=[12, 10, 2, 2],
-        # upsample_initial_channel=512,
-        # upsample_kernel_sizes=[24, 20, 4, 4],
-        # gin_channels=256,
-        # sr=48000
-    # ).cuda()
-
-    # with torch.autograd.set_detect_anomaly(True):
-        # # Create dummy inputs
-        # x = torch.randn(1, 192, 36).cuda().requires_grad_(True)
-        # f0 = torch.randn(1, 36).cuda()
-        # g = torch.randn(1, 256, 36).cuda()
-
-        # try:
-            # # Forward pass
-            # output = model(x, f0, g)
-
-            # # Backward pass
-            # # This is where an inplace error would trigger a crash
-            # loss = output.sum()
-            # loss.backward()
-
-            # print("✅ 100% SAFE: Backward pass completed without inplace errors.")
-
-        # except RuntimeError as e:
-            # print(f"❌ INPLACE ERROR DETECTED: {e}")
-
-# if __name__ == "__main__":
-    # debug_inplace_safety()

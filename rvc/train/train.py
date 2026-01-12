@@ -201,15 +201,6 @@ class EpochRecorder:
         return f"Current time: {current_time} | Time per epoch: {elapsed_time_str}"
 
 def setup_env_and_distr(rank, n_gpus, device, device_id, config):
-    if rank == 0:
-        writer_eval = SummaryWriter(
-            log_dir=os.path.join(experiment_dir, "eval"),
-            flush_secs=86400 # Periodic background flush's timer workarouand.
-        )
-        block_tensorboard_flush_on_exit(writer_eval)
-    else:
-        writer_eval = None
-
     dist.init_process_group(
         backend="gloo" if sys.platform == "win32" or device.type != "cuda" else "nccl",
         init_method="env://",
@@ -220,8 +211,6 @@ def setup_env_and_distr(rank, n_gpus, device, device_id, config):
     torch.manual_seed(config.train.seed)
     if torch.cuda.is_available():
         torch.cuda.set_device(device_id)
-
-    return writer_eval
 
 def prepare_dataloaders(config, n_gpus, rank, batch_size, use_validation, benchmark_mode):
     from data_utils import (
@@ -343,13 +332,11 @@ def get_optimizers(
         lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
         betas=(0.8, 0.99),
         eps=1e-9,
-        weight_decay=0.0,
     )
     common_args_d = dict(
         lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
         betas=(0.8, 0.99),
         eps=1e-9,
-        weight_decay=0.0,
     )
     adamwspd_args_g = dict(
         lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
@@ -719,7 +706,7 @@ def run(
     )
 
     # Initial setup
-    writer_eval = setup_env_and_distr(
+    setup_env_and_distr(
         rank,
         n_gpus,
         device,
@@ -785,6 +772,19 @@ def run(
         n_gpus,
         rank
     )
+
+    # Tensorboard handling
+    if rank == 0:
+        writer_eval = SummaryWriter(
+            log_dir=os.path.join(experiment_dir, "eval"),
+            flush_secs=86400,
+            purge_step=global_step
+        )
+        block_tensorboard_flush_on_exit(writer_eval)
+        if global_step != 0:
+            print(f"[INIT] TensorBoard writer initialized. Purging logs after step: {global_step}")
+        else:
+            print(f"[INIT] TensorBoard writer initialized.")
 
     # from-scratch checker ( disables average loss )
     if pretrainG in ["", "None"] and pretrainD in ["", "None"]:
@@ -1091,7 +1091,7 @@ def training_loop(
                 else:
                     kl_beta = 1.0
 
-                loss_kl = kl_loss_clamped(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl
+                loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl
 
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     # RingFormer related;  Phase, Magnitude and SD:
@@ -1147,8 +1147,16 @@ def training_loop(
 
             # Loss accumulation for rolling-avg
             # Grads:
-            avg_rolling_cache["grad_norm_d"].append(grad_norm_d)
-            avg_rolling_cache["grad_norm_g"].append(grad_norm_g)
+            if torch.isfinite(grad_norm_d):
+                avg_rolling_cache["grad_norm_d"].append(grad_norm_d)
+            else:
+                writer.add_scalar("Grad_Norm/D_Skipped", 1, global_step)
+
+            if torch.isfinite(grad_norm_g):
+                avg_rolling_cache["grad_norm_g"].append(grad_norm_g)
+            else:
+                writer.add_scalar("Grad_Norm/G_Skipped", 1, global_step)
+
             # Losses:
             avg_rolling_cache["loss_disc"].append(loss_disc.detach())
             avg_rolling_cache["loss_adv"].append(loss_adv.detach()) 
