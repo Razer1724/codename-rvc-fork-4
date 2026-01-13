@@ -17,6 +17,7 @@ from core import (
     run_prerequisites_script,
     run_train_script,
     stop_train_script,
+    early_save_stop,
 )
 from rvc.configs.config import get_gpu_info, get_number_of_gpus, max_vram_gpu, microarchitecture_capability_checker, check_if_fp16
 from rvc.lib.utils import format_title
@@ -1004,6 +1005,13 @@ def train_tab():
             stop_train_button = gr.Button("Stop Training", visible=True)
             stop_train_button.click(
                 fn=stop_train_script,
+                inputs=[],
+                outputs=[train_output_info],
+            )
+
+            early_stop_button = gr.Button("Early Stopping", visible=True)
+            early_stop_button.click(
+                fn=early_save_stop,
                 inputs=[],
                 outputs=[train_output_info],
             )

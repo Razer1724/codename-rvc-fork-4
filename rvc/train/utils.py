@@ -5,6 +5,7 @@ import signal
 import sys
 
 import torch
+import torch.distributed as dist
 from torch.nn import functional as F
 import numpy as np
 import soundfile as sf
@@ -18,6 +19,7 @@ debug_save_load = False
 from itertools import chain
 from utils_cdnm import check_optimizer_coverage, verify_optimizer_has_all_params
 from mel_processing import mel_spectrogram_torch
+from rvc.train.process.extract_model import extract_model
 
 def replace_keys_in_dict(d, old_key_part, new_key_part):
     """
@@ -715,3 +717,60 @@ def verify_spk_dim(
         print(f"    ██████  Initializing the generator with: {spk_dim} speakers.")
 
     return spk_dim
+
+
+def early_stopper(
+    stopper, 
+    rank, 
+    global_step, 
+    epoch, 
+    architecture, 
+    nets, 
+    optims, 
+    config, 
+    experiment_dir, 
+    gradscaler, 
+    save_weight_models,
+    model_name,
+    vocoder,
+    vits2_mode,
+    n_gpus
+):
+    if stopper is not None and stopper.stop_triggered:
+        net_g, net_d = nets
+        optim_g, optim_d = optims
+
+        if rank == 0:
+            print(f"[TRAINING] Saving the models at steps: '{global_step}' in progress ...")
+
+            g_path = os.path.join(experiment_dir, f"G_{global_step}.pth")
+            d_path = os.path.join(experiment_dir, f"D_{global_step}.pth")
+
+            # Save Generator checkpoint
+            save_checkpoint(architecture, net_g, optim_g, config.train.learning_rate, epoch, g_path, gradscaler)
+            # Save Discriminator checkpoint
+            save_checkpoint(architecture, net_d, optim_d, config.train.learning_rate, epoch, d_path, gradscaler)
+
+            # Save small weight model
+            if save_weight_models:
+                weight_model_name = small_model_naming(model_name, epoch, global_step)
+                model_path = os.path.join(experiment_dir, weight_model_name)
+
+                ckpt = net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict()
+                extract_model(
+                    ckpt=ckpt, 
+                    sr=config.data.sample_rate, 
+                    name=model_name, 
+                    model_path=model_path, 
+                    epoch=epoch, 
+                    step=global_step, 
+                    hps=config, 
+                    vocoder=vocoder, 
+                    architecture=architecture, 
+                    vits2_mode=vits2_mode
+                )
+                print(f"[TRAINING] All finished .. You can ignore anything past this msg.")
+        if n_gpus > 1:
+            dist.barrier()
+        return True
+    return False

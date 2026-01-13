@@ -1,4 +1,5 @@
 import os
+import signal
 import datetime
 import glob
 import itertools
@@ -10,7 +11,7 @@ import sys
 
 pid_data = {"process_pids": []}
 os.environ["USE_LIBUV"] = "0" if sys.platform == "win32" else "1"
-
+os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 from typing import Tuple, Optional
 from collections import deque
 from distutils.util import strtobool
@@ -58,6 +59,7 @@ from utils import (
     print_init_setup,
     train_loader_safety,
     verify_spk_dim,
+    early_stopper
 )
 from losses import (
     discriminator_loss,
@@ -69,11 +71,11 @@ from losses import (
     kl_loss,
     kl_loss_clamped,
     phase_loss,
-    envelope_loss,
+    envelope_loss
 )
 from mel_processing import (
     spec_to_mel_torch,
-    MultiScaleMelSpectrogramLoss,
+    MultiScaleMelSpectrogramLoss
 )
 from rvc.train.process.extract_model import extract_model
 from rvc.lib.algorithm import commons
@@ -167,6 +169,17 @@ new_pretrain_lr = 5e-5
 
 import logging
 logging.getLogger("torch").setLevel(logging.ERROR)
+
+class EarlyStopSignalHandler:
+    def __init__(self):
+        self.stop_triggered = False
+        signal.signal(signal.SIGINT, self._handler)
+        if sys.platform == "win32":
+            signal.signal(signal.SIGBREAK, self._handler)
+
+    def _handler(self, signum, frame):
+        self.stop_triggered = True
+        print(f"\n[TRAINING] Early Stopping signal received! Finishing current step and saving...")
 
 
 def eval_infer(net_g, reference):
@@ -438,11 +451,20 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
     try:
         print("    ██████  Starting the training ...")
 
-        # Confirm presence of checkpoints
-        g_checkpoint_path = latest_checkpoint_path(experiment_dir, "G_*.pth")
-        d_checkpoint_path = latest_checkpoint_path(experiment_dir, "D_*.pth")
+        # Get latest G and D based on the highest steps count in the filename
+        def get_highest_checkpoint(prefix):
+            pattern = re.compile(rf"^{prefix}(\d+)\.pth$")
+            files = []
+            for f in os.listdir(experiment_dir):
+                match = pattern.match(f)
+                if match:
+                    files.append((int(match.group(1)), os.path.join(experiment_dir, f)))
+            return sorted(files, key=lambda x: x[0], reverse=True)[0][1] if files else None
 
-        # If they exist, we attempt to resume the training
+        # Confirm presence of checkpoints
+        # If they exist, attempt to resume the training
+        g_checkpoint_path = get_highest_checkpoint("G_")
+        d_checkpoint_path = get_highest_checkpoint("D_")
         if g_checkpoint_path and d_checkpoint_path:
 
             # Init the optimizers
@@ -464,8 +486,11 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
                     param_group['initial_lr'] = new_lr_for_pretrain
                 print(f"[OVERRIDE] Pretrain LR Override: {new_lr_for_pretrain}")
 
-            epoch_str += 1
-            global_step = (epoch_str - 1) * len(train_loader)
+            #epoch_str += 1
+            #global_step = (epoch_str - 1) * len(train_loader)
+
+            global_step = int(os.path.basename(g_checkpoint_path).split("_")[-1].split(".")[0])
+            epoch_str = (global_step // len(train_loader)) + 1
             print(f"[RESUMING] (G) & (D) at global_step: {global_step} and epoch count: {epoch_str - 1}")
         else:
             raise FileNotFoundError("No checkpoints found.")
@@ -684,6 +709,8 @@ def run(
     """
     global global_step, warmup_completed, optimizer_choice, from_scratch
 
+    stopper = EarlyStopSignalHandler()
+
     if 'warmup_completed' not in globals():
         warmup_completed = False
 
@@ -824,7 +851,7 @@ def run(
     cache = []
 
     for epoch in range(epoch_str, total_epoch_count + 1):
-        training_loop(
+        should_stop = training_loop(
             rank,
             epoch,
             config,
@@ -847,6 +874,7 @@ def run(
             gradscaler,
             fn_hinge_loss,
             hann_window,
+            stopper=stopper
         )
 
         if use_warmup and epoch <= warmup_duration:
@@ -896,6 +924,7 @@ def training_loop(
     gradscaler,
     fn_hinge_loss=None,
     hann_window=None,
+    stopper=None,
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -979,8 +1008,18 @@ def training_loop(
 
     use_amp = (config.train.bf16_run or config.train.fp16_run) and device.type == "cuda"
 
-    with tqdm(total=len(train_loader), leave=False) as pbar:
+    # Partial resume aligning
+    current_epoch_start_step = (epoch - 1) * len(train_loader)
+    start_batch_idx = global_step - current_epoch_start_step
+    start_batch_idx = max(0, start_batch_idx)
+    
+    #with tqdm(total=len(train_loader), leave=False) as pbar:
+    with tqdm(total=len(train_loader), leave=False, initial=start_batch_idx) as pbar:
         for batch_idx, info in data_iterator:
+
+            # Catch up with previously processed steps if resuming from partial ckpts
+            if batch_idx < start_batch_idx:
+                continue
 
             global_step += 1
 
@@ -1205,6 +1244,15 @@ def training_loop(
                 torch.cuda.empty_cache()
 
             pbar.update(1)
+
+            if early_stopper(
+                stopper, rank, global_step, epoch, architecture, 
+                [net_g, net_d], [optim_g, optim_d], config, 
+                experiment_dir, gradscaler, save_weight_models,
+                model_name, vocoder, vits2_mode, n_gpus
+            ):
+                return True
+
         # end of batch train
     # end of tqdm
 
@@ -1333,27 +1381,22 @@ def training_loop(
 
         # Save weights every N epochs
         if epoch % epoch_save_frequency == 0:
-            checkpoint_suffix = f"{2333333 if save_only_latest_net_models else global_step}.pth"
+            g_path = os.path.join(experiment_dir, f"G_{global_step}.pth")
+            d_path = os.path.join(experiment_dir, f"D_{global_step}.pth")
+
+            if save_only_latest_net_models:
+                old_files = glob.glob(os.path.join(experiment_dir, "G_*.pth")) + glob.glob(os.path.join(experiment_dir, "D_*.pth"))
+                for f in old_files:
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
+
             # Save Generator checkpoint
-            save_checkpoint(
-                architecture,
-                net_g,
-                optim_g,
-                config.train.learning_rate,
-                epoch,
-                os.path.join(experiment_dir, "G_" + checkpoint_suffix),
-                gradscaler,
-            )
+            save_checkpoint(architecture, net_g, optim_g, config.train.learning_rate, epoch, g_path, gradscaler)
             # Save Discriminator checkpoint
-            save_checkpoint(
-                architecture,
-                net_d,
-                optim_d,
-                config.train.learning_rate,
-                epoch,
-                os.path.join(experiment_dir, "D_" + checkpoint_suffix),
-                gradscaler,
-            )
+            save_checkpoint(architecture, net_d, optim_d, config.train.learning_rate, epoch, d_path, gradscaler)
+
             # Save small weight model
             if save_weight_models:
                 weight_model_name = small_model_naming(model_name, epoch, global_step)
@@ -1361,21 +1404,15 @@ def training_loop(
 
         # Check completion
         if epoch >= total_epoch_count:
-            print(
-                f"Training has been successfully completed with {epoch} epoch, {global_step} steps and {round(loss_gen_total.item(), 3)} loss gen."
-            )
+            print(f"Training has been successfully completed with {epoch} epoch, {global_step} steps and {round(loss_gen_total.item(), 3)} loss gen.")
             # Final model
             weight_model_name = small_model_naming(model_name, epoch, global_step)
             model_add.append(os.path.join(experiment_dir, weight_model_name))
-
             done = True
 
         if model_add:
-            ckpt = (
-                net_g.module.state_dict()
-                if hasattr(net_g, "module")
-                else net_g.state_dict()
-            )
+            ckpt = (net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict())
+
             for m in model_add:
                 if not os.path.exists(m):
                     extract_model(
@@ -1398,7 +1435,7 @@ def training_loop(
                 writer.flush()
                 writer.close()
 
-            os._exit(2333333)
+            os._exit(0) #2333333
 
         with torch.no_grad():
             torch.cuda.empty_cache()
