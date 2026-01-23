@@ -461,16 +461,16 @@ def train_tab():
                     label="Resampling & Loading Handler",
                     info="- **librosa** - Uses SoX resampler \n ( SoXr set to VHQ by default. ).\n- **ffmpeg** -  Uses SW resampler \n ( Windowed Sinc filter with Blackman-Nuttall window ) \n\n **Both are viable choices!** \n **( But I'd actually go with Sinc / FFmpeg. )**",
                     choices=["librosa", "ffmpeg"],
-                    value="ffmpeg",
+                    value="librosa",
                     interactive=True,
                     scale=1.45,
                     key='loading_resampling'
                 )
                 normalization_mode = gr.Radio(
                     label="Loudness Normalization",
-                    info="- **none:** Disabled \n ( Select this if the files are already normalized. ) \n- **post_lufs:** PyLoud Post-Normalization \n ( Loudness norm. of each sliced segment. ) \n- **post_peak:** Peak Post-Normalization \n ( Peak [ 0.95] norm of each sliced segment. ) \n ",
-                    choices=["none", "post_lufs", "post_peak"],
-                    value="post_lufs",
+                    info="- **none:** Disabled \n ( Select this if the files are already normalized. ) \n- **post_lufs:** PyLoud Post-Normalization \n ( Loudness norm. of each sliced segment. ) \n- **post_lufs_vad:** Silero VAD + PyLoud Post-Normalization \n ( Loudness norm. of each sliced segment. ) \n- **post_peak:** Peak Post-Normalization \n ( Peak [ 0.95] norm of each sliced segment. ) \n ",
+                    choices=["none", "post_lufs", "post_lufs_vad", "post_peak"],
+                    value="post_lufs_vad",
                     interactive=True,
                     visible=True,
                     key='normalization_mode'
@@ -773,7 +773,6 @@ def train_tab():
                     )
                     use_env_loss = gr.Checkbox(
                         label="Use envelope loss",
-                        #info="Enables envelope loss for training. \n Might help with phase, waveform and transients consistency. Disabled by default. \n **Mandatory for PCPH-GAN.**",
                         info="Enables envelope loss during training. \n Helps match volume peaks and troughs, improving waveform transients, phase consistency, and overall audio clarity. Disabled by default. \n**Required for PCPH-GAN.**",
                         value=False,
                         interactive=True,
@@ -783,7 +782,7 @@ def train_tab():
                         label="Learning rate scheduler",
                         info="- **exp decay:** Decays the lr exponentially - **Safe default.** \n **( 'step' variant decays per step, 'epoch' per epoch. For finetuning per-step is recommended. )** \n- **cosine annealing:** Cosine annealing schedule - **Optional alternative.** \n- **none:** No scheduler - **For debugging or developing.**",
                         choices=["exp decay step", "exp decay epoch", "cosine annealing", "none"],
-                        value="exp decay step",
+                        value="exp decay epoch",
                         interactive=True,
                         key='lr_scheduler'
                     )

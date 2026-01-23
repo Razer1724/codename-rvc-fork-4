@@ -1980,7 +1980,7 @@ def parse_arguments():
         "--normalization_mode",
         type=str,
         help="Normalization mode.",
-        choices=["none", "post_lufs", "post_peak"],
+        choices=["none", "post_lufs", "post_peak", "post_lufs_vad"],
         default="post_lufs",
         required=False,
     )

@@ -14,6 +14,9 @@ import shutil
 import soundfile as sf
 import pyloudnorm as pyln
 
+import torch
+import torchaudio
+
 import soxr
 from fractions import Fraction
 
@@ -44,6 +47,7 @@ HIGH_PASS_CUTOFF = 48
 SAMPLE_RATE_16K = 16000
 RES_TYPE = "soxr_vhq"
 
+_vad_model_cache = {}
 
 def secs_to_samples(secs, sr):
     """Return an *exact* integer number of samples for `secs` seconds at `sr` Hz.
@@ -53,6 +57,9 @@ def secs_to_samples(secs, sr):
         raise ValueError(f"{secs}s × {sr}Hz is not an integer sample count")
     return frac.numerator
 
+def _init_vad_worker():
+    """Initializes the VAD model once per process."""
+    _get_vad_tooling()
 
 class PreProcess:
     def __init__(self, sr: int, exp_dir: str):
@@ -235,6 +242,34 @@ def _process_audio_worker(args):
         loading_resampling,
     )
 
+def _process_and_save_vad_worker(args):
+    file_name, target_lufs, gt_wavs_dir, wavs16k_dir = args
+    try:
+        # Process Ground Truth
+        gt_path = os.path.join(gt_wavs_dir, file_name)
+        gt_audio, gt_sr = sf.read(gt_path)
+        
+        current_lufs = _measure_vad_lufs(gt_audio, gt_sr)
+        gt_normalized = pyln.normalize.loudness(gt_audio, current_lufs, target_lufs)
+        
+        # Check for clipping
+        if np.abs(gt_normalized).max() > 1.0:
+            gt_normalized = gt_normalized / np.abs(gt_normalized).max() * 0.99
+            
+        wavfile.write(gt_path, gt_sr, gt_normalized.astype(np.float32))
+
+        # Process 16k version
+        k16_path = os.path.join(wavs16k_dir, file_name)
+        k16_audio, k16_sr = sf.read(k16_path)
+        k16_normalized = pyln.normalize.loudness(k16_audio, current_lufs, target_lufs)
+        
+        if np.abs(k16_normalized).max() > 1.0:
+            k16_normalized = k16_normalized / np.abs(k16_normalized).max() * 0.99
+
+        wavfile.write(k16_path, k16_sr, k16_normalized.astype(np.float32))
+    except Exception as e:
+        logger.error(f"Error in VAD normalization for {file_name}: {e}")
+
 def _process_and_save_worker(args):
     file_name, final_lufs_target, gt_wavs_dir, wavs16k_dir = args
     try:
@@ -317,6 +352,49 @@ def _measure_lufs_and_peak_worker(file_path):
     except Exception as e:
         logger.error(f"Error measuring loudness for {file_path}: {e}")
         return None
+
+
+def _measure_vad_lufs_and_peak_worker(file_path):
+    try:
+        audio, sr = sf.read(file_path)
+        if np.max(np.abs(audio)) == 0:
+            return -np.inf, -np.inf
+
+        vad_lufs = _measure_vad_lufs(audio, sr) 
+        sample_peak = 20 * np.log10(np.max(np.abs(audio)))
+
+        return vad_lufs, sample_peak
+    except Exception as e:
+        logger.error(f"Error measuring VAD levels for {file_path}: {e}")
+        return None
+
+
+def _get_vad_tooling():
+    if "model" not in _vad_model_cache:
+        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, trust_repo=True)
+        _vad_model_cache["model"] = model
+        _vad_model_cache["utils"] = utils
+    return _vad_model_cache["model"], _vad_model_cache["utils"]
+
+def _measure_vad_lufs(audio, sr):
+    model, utils = _get_vad_tooling()
+    (get_speech_timestamps, _, _, _, collect_chunks) = utils
+    
+    # Silero VAD requires 16k sample rate for analysis
+    audio_16k = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+    tensor_audio = torch.from_numpy(audio_16k).float()
+    
+    speech_timestamps = get_speech_timestamps(tensor_audio, model, sampling_rate=16000)
+    
+    if not speech_timestamps:
+        # Fallback to standard integrated LUFS if no speech detected
+        meter = pyln.Meter(sr, block_size=0.200)
+        return meter.integrated_loudness(audio)
+        
+    # Measure LUFS of ONLY the speech chunks
+    speech_chunks = collect_chunks(speech_timestamps, tensor_audio).numpy()
+    meter_vad = pyln.Meter(16000, block_size=0.200)
+    return meter_vad.integrated_loudness(speech_chunks)
 
 def normalize_sliced_audio(
     exp_dir: str,
@@ -424,6 +502,9 @@ def preprocess_training_set(
     lufs_range_finder: bool
 ):
     start_time = time.time()
+    if normalization_mode == "post_lufs_vad" or lufs_range_finder:
+        logger.info("Ensuring VAD model is downloaded and cached...")
+        _get_vad_tooling()
     logger.info(f"Starting preprocess with {num_processes} processes...")
 
     files = []
@@ -488,6 +569,47 @@ def preprocess_training_set(
             )
         except Exception as e:
             logger.error(f"Normalization failed: {e}. Aborting.")
+            cleanup_dirs(exp_dir)
+            return
+
+    if normalization_mode == "post_lufs_vad":
+        logger.info("Advanced VAD-gated Loudness Normalization enabled.")
+        gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
+        wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
+        audio_files = [f for f in os.listdir(gt_wavs_dir) if f.endswith(".wav")]
+
+        final_target = target_lufs
+
+        if lufs_range_finder:
+            logger.info("Starting VAD-aware dry run...")
+            file_paths = [os.path.join(gt_wavs_dir, f) for f in audio_files]
+
+            with multiprocessing.Pool(processes=num_processes) as pool:
+                results = list(tqdm(pool.imap_unordered(_measure_vad_lufs_and_peak_worker, file_paths), 
+                                    total=len(file_paths), desc="Analyzing Speech Peaks"))
+            valid_stats = [r for r in results if r is not None and r[0] > -np.inf]
+
+            if valid_stats:
+                safety_margin_db = -1.0
+                potential_targets = []
+                for v_lufs, peak in valid_stats:
+                    gain_to_safe_peak = safety_margin_db - peak
+                    potential_targets.append(v_lufs + gain_to_safe_peak)
+
+                final_target = min(potential_targets)
+                logger.info(f"VAD Range Finder calculated a safe speech target of: {final_target:.2f} LUFS")
+
+        arg_list = [(f, final_target, gt_wavs_dir, wavs16k_dir) for f in audio_files]
+
+        try:
+            with multiprocessing.Pool(
+                processes=num_processes,
+                initializer=_init_vad_worker
+            ) as pool:
+                list(tqdm(pool.imap_unordered(_process_and_save_vad_worker, arg_list), 
+                            total=len(audio_files), desc="VAD Normalization"))
+        except Exception as e:
+            logger.error(f"VAD Normalization failed: {e}. Aborting.")
             cleanup_dirs(exp_dir)
             return
 

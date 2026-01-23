@@ -363,7 +363,22 @@ def get_optimizers(
         eps=1e-9,
         weight_decay=0.5,
     )
-
+    radam_args_g = dict(
+        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
+        betas=(0.8, 0.99),
+        eps=1e-9,
+        weight_decay=0.01,
+        decoupled_weight_decay=True,
+        foreach=True,
+    )
+    radam_args_d = dict(
+        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
+        betas=(0.8, 0.99),
+        eps=1e-9,
+        weight_decay=0.01,
+        decoupled_weight_decay=True,
+        foreach=True,
+    )
     # For exotic optimizers
     ranger_args = dict(
         num_epochs=total_epoch_count,
@@ -394,9 +409,8 @@ def get_optimizers(
         optim_d = AdamW_BF16(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d, kahan_sum=True, foreach=True)
 
     elif optimizer_choice == "RAdam":
-        from rvc.train.custom_optimizers.radam_foreach import RAdamForEach
-        optim_g = RAdamForEach(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g)
-        optim_d = RAdamForEach(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d)
+        optim_g = torch.optim.RAdam(filter(lambda p: p.requires_grad, net_g.parameters()), **radam_args_g)
+        optim_d = torch.optim.RAdam(filter(lambda p: p.requires_grad, net_d.parameters()), **radam_args_d)
 
     elif optimizer_choice == "DiffGrad":
         from rvc.train.custom_optimizers.diffgrad import diffgrad
