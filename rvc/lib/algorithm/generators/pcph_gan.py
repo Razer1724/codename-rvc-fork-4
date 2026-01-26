@@ -366,7 +366,7 @@ class PCPH_GAN_Generator(nn.Module):
         )
 
         # Initial feats conv, projection: 192 -> 512
-        self.conv_pre = Conv1d(initial_channel, upsample_initial_channel, 7, 1, padding=3)
+        self.conv_pre = weight_norm(Conv1d(initial_channel, upsample_initial_channel, 7, 1, padding=3))
 
         # Module containers init
         self.ups = nn.ModuleList()
@@ -397,7 +397,7 @@ class PCPH_GAN_Generator(nn.Module):
                 self.har_convs.append(Conv1d(1, ch, kernel_size=1))
 
         # Post convolution
-        self.conv_post = Conv1d(ch, 1, 7, 1, padding=3, bias=False)
+        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3, bias=False))
 
         # init weights
         self.ups.apply(init_weights)
@@ -461,8 +461,19 @@ class PCPH_GAN_Generator(nn.Module):
         # ResBlocks
         for l in self.resblocks:
             l.remove_weight_norm()
+        # pre convolution
+        remove_weight_norm(self.conv_pre)
+        # post convolution
+        remove_weight_norm(self.conv_post)
 
     def __prepare_scriptable__(self):
+        # Pre convolution
+        for hook in self.conv_pre._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                remove_weight_norm(self.conv_pre)
         # Upsamplers
         for l in self.ups:
             for hook in l._forward_pre_hooks.values():
@@ -479,5 +490,12 @@ class PCPH_GAN_Generator(nn.Module):
                     and hook.__class__.__name__ == "WeightNorm"
                 ):
                     remove_weight_norm(l)
+        # Post convolution
+        for hook in self.conv_post._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                remove_weight_norm(self.conv_post)
 
         return self

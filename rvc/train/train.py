@@ -1,4 +1,5 @@
 import os
+import io
 import signal
 import datetime
 import glob
@@ -19,6 +20,13 @@ from random import randint, shuffle
 from time import time as ttime, sleep
 
 import numpy as np
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.cm as cm
+
 import psutil
 from tqdm import tqdm
 from pesq import pesq
@@ -164,6 +172,7 @@ c_stft = 21.0 # Seems close enough to multi-scale mel loss's magnitude, but need
 pretrain_preview = True # Generates preview audio samples every 50 steps
 override_pretrain_lr = False
 new_pretrain_lr = 5e-5
+use_trajectory = False
 
 ##################################################################
 
@@ -212,6 +221,154 @@ class EpochRecorder:
         current_time = datetime.datetime.now().strftime("%H:%M:%S")
 
         return f"Current time: {current_time} | Time per epoch: {elapsed_time_str}"
+
+class WeightTrajectoryVisualizer:
+    def __init__(self, history_limit=50):
+        self.history_limit = history_limit
+        self.downsample_size = 8000  # Slight reduce per-section to keep speed high
+        
+        # Separate histories for Vocoder (Decoder) and Context (Encoders/Flow)
+        self.history = {
+            "vocoder": {"weights": [], "epoch": []},
+            "context": {"weights": [], "epoch": []}
+        }
+
+    def update(self, model, epoch):
+        if hasattr(model, 'module'):
+            model_ref = model.module
+        else:
+            model_ref = model
+
+        vocoder_weights = []
+        context_weights = []
+
+        for name, param in model_ref.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            # --- RVC Separation Logic ---
+            # 'dec' is the Generator/Vocoder (HiFi-GAN, RefineGAN, etc.)
+            # Everything else (enc_p, enc_q, flow, emb_g) is "Context"
+            data = param.detach().cpu().flatten()
+            if name.startswith("dec."):
+                vocoder_weights.append(data)
+            else:
+                context_weights.append(data)
+
+        # Process both groups
+        self._process_group("vocoder", vocoder_weights, epoch)
+        self._process_group("context", context_weights, epoch)
+
+    def _process_group(self, key, weights_list, epoch):
+        if not weights_list:
+            return
+
+        flat = torch.cat(weights_list)
+        
+        # Downsample
+        if flat.numel() > self.downsample_size:
+            step = flat.numel() // self.downsample_size
+            flat = flat[::step].clone()
+
+        # Update History
+        group = self.history[key]
+        group["weights"].append(flat.numpy())
+        group["epoch"].append(epoch)
+
+        if len(group["weights"]) > self.history_limit:
+            group["weights"].pop(0)
+            group["epoch"].pop(0)
+
+    def get_plot(self):
+        """
+        2-Row Dashboard:
+        Top; Vocoder ( Decoder )
+        Bottom; Context ( Encoders / Flow )
+        """
+        if len(self.history["vocoder"]["weights"]) < 3 and len(self.history["context"]["weights"]) < 3:
+            return None
+
+        #fig = plt.figure(figsize=(12, 9), dpi=100)
+        fig = plt.figure(figsize=(15, 9), dpi=100)
+        gs = gridspec.GridSpec(
+            2, 3,
+            width_ratios=[2.4, 1.1, 1.1],
+            height_ratios=[1, 1]
+        )
+        fig.patch.set_facecolor('#f2f2f2')
+
+        # Plot Vocoder and Context
+        self._plot_row(fig, gs, 0, "vocoder", "Vocoder (HiFi-GAN)")
+        self._plot_row(fig, gs, 1, "context", "Context (Enc/Flow)")
+
+        plt.tight_layout()
+
+        fig.canvas.draw()
+        data_np = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data_np = data_np.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close(fig)
+
+        return data_np
+
+    def _plot_row(self, fig, gs, row_idx, key, title_prefix):
+        group = self.history[key]
+        if len(group["weights"]) < 3:
+            return
+
+        data = np.stack(group["weights"])
+        epochs = group["epoch"]
+
+        # PCA
+        mean = np.mean(data, axis=0)
+        centered = data - mean
+        u, s, vh = np.linalg.svd(centered, full_matrices=False)
+        coords = u[:, :2] * s[:2]
+
+        # Explained Variance
+        expl_var = (s[:2] ** 2) / np.sum(s ** 2)
+        total_var = np.sum(expl_var) * 100
+
+        # Velocity ( Update Magnitude )
+        velocity = np.linalg.norm(np.diff(data, axis=0), axis=1)
+
+        # Drift ( Distance from Start )
+        drift = np.linalg.norm(data - data[0], axis=1)
+
+        # Trajectory
+        ax_traj = fig.add_subplot(gs[row_idx, 0])
+        #colors = cm.viridis(np.linspace(0.2, 1, len(coords)))
+        colors = cm.cividis(np.linspace(0.15, 0.85, len(coords)))
+
+        # Arrows
+        for i in range(len(coords) - 1):
+            ax_traj.annotate('', xy=coords[i+1], xytext=coords[i], arrowprops=dict(arrowstyle="->", color=colors[i], lw=1.4))
+
+        ax_traj.scatter(coords[:, 0], coords[:, 1], c=colors, s=30)
+        ax_traj.text(coords[0, 0], coords[0, 1], 'Start', fontsize=8, fontweight='bold')
+        ax_traj.text(coords[-1, 0], coords[-1, 1], f'Ep {epochs[-1]}', fontsize=8, fontweight='bold', color='red')
+
+        ax_traj.set_title(f"{title_prefix} Trajectory (Var: {total_var:.1f}%)", fontsize=11, fontweight='bold')
+        ax_traj.grid(True, alpha=0.3)
+        ax_traj.set_xticks([])
+        ax_traj.set_yticks([])
+
+        # Velocity
+        ax_vel = fig.add_subplot(gs[row_idx, 1])
+        ax_vel.plot(epochs[1:], velocity, color='#2e7d32', lw=1.6)
+        ax_vel.set_title("Update Speed", fontsize=10)
+        ax_vel.grid(True, alpha=0.3)
+        ax_vel.tick_params(axis='x', labelsize=8)
+
+        # Drift
+        ax_drift = fig.add_subplot(gs[row_idx, 2])
+        ax_drift.plot(epochs, drift, color='teal', lw=1.5)
+        ax_drift.fill_between(epochs, drift, color='teal', alpha=0.1)
+        ax_drift.set_title("Total Drift", fontsize=10)
+        ax_drift.grid(True, alpha=0.3)
+        ax_drift.tick_params(axis='x', labelsize=8)
+
+        for ax in [ax_traj, ax_vel, ax_drift]:
+            ax.set_facecolor('#f7f7f7')
 
 def setup_env_and_distr(rank, n_gpus, device, device_id, config):
     dist.init_process_group(
@@ -821,7 +978,14 @@ def run(
             flush_secs=86400,
             purge_step=global_step
         )
+
+        if use_trajectory:
+            trajectory_tracker = WeightTrajectoryVisualizer(history_limit=100)
+        else:
+            trajectory_tracker = None
+
         block_tensorboard_flush_on_exit(writer_eval)
+
         if global_step != 0:
             print(f"[INIT] TensorBoard writer initialized. Purging logs after step: {global_step}")
         else:
@@ -888,7 +1052,8 @@ def run(
             gradscaler,
             fn_hinge_loss,
             hann_window,
-            stopper=stopper
+            stopper=stopper,
+            trajectory_tracker=trajectory_tracker
         )
 
         if use_warmup and epoch <= warmup_duration:
@@ -939,6 +1104,7 @@ def training_loop(
     fn_hinge_loss=None,
     hann_window=None,
     stopper=None,
+    trajectory_tracker=None,
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -1353,6 +1519,16 @@ def training_loop(
 
         # At each epoch save point:
         if epoch % epoch_save_frequency == 0:
+
+            if trajectory_tracker is not None:
+                # Update tracker with current model weights
+                trajectory_tracker.update(net_g, epoch)
+                # Get the PCA image
+                traj_img = trajectory_tracker.get_plot()
+                # Log to TensorBoard
+                if traj_img is not None:
+                    writer.add_image("Training/Weight_Trajectory", traj_img, global_step, dataformats='HWC')
+
             if not benchmark_mode:
                 if use_validation:
                 # Run validation
