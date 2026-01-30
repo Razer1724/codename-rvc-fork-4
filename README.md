@@ -112,7 +112,7 @@ Run the installation script:
 
 ### 2. Running the Fork
 
-Start Applio using:
+Use the run script:
 
 - Double-click `run-fork.bat`.
  
