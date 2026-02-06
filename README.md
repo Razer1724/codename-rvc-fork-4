@@ -59,6 +59,9 @@
  
 - Hold-Out type validation mechanism during training. `( L1 MEL, mrSTFT, PESQ, SI-SDR )`
  
+- My own ml-based silence-truncation approach.
+<br/>[More info](https://github.com/codename0og/SmartCutter)
+ 
 - Support for 'Spin' embedder. ` ( and perhaps more in future. ) `
  
 - Many available optimizers.  ` ( AdamW [and optimi variant for bf16), RAdam, AdamSPD, Ranger21, DiffGrad, Prodigy ) `
