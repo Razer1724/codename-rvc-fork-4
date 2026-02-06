@@ -32,7 +32,7 @@ rvc/models/embedders/contentvec/pytorch_model.bin
 rvc/models/embedders/spin_v1/config.json
 rvc/models/embedders/spin_v2/config.json
 rvc/models/embedders/contentvec/config.json
-
+rvc/models/smartcutter/
 rvc/infer/pipeline - debug_ver.py
 rvc/lib/utils - debug.py
 rvc/lib/algorithm/generators/Vocoder_Experiments

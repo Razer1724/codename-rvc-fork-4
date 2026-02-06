@@ -5,7 +5,6 @@ from torch.nn.utils.parametrizations import weight_norm
 from typing import Optional
 
 from rvc.lib.algorithm.residuals import LRELU_SLOPE, ResBlock
-from rvc.lib.algorithm.commons import init_weights
 
 
 class HiFiGANGenerator(torch.nn.Module):
@@ -65,7 +64,6 @@ class HiFiGANGenerator(torch.nn.Module):
                 self.resblocks.append(ResBlock(ch, k, d))
 
         self.conv_post = torch.nn.Conv1d(ch, 1, 7, 1, padding=3, bias=False)
-        self.ups.apply(init_weights)
 
         if gin_channels != 0:
             self.cond = torch.nn.Conv1d(gin_channels, upsample_initial_channel, 1)

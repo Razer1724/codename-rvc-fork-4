@@ -31,6 +31,7 @@ run_prerequisites_script(
     pretraineds_hifigan=True,
     models=True,
     exe=True,
+    smartcutter=True,
 )
 
 # Check installation
@@ -47,7 +48,7 @@ CodenameViolet = loadThemes.load_theme() or "ParityError/Interstellar"
 with gr.Blocks(
     theme=CodenameViolet, title="Codename-RVC-Fork 🍇", css="footer{display:none !important}"
 ) as Applio:
-    gr.Markdown("# Codename-RVC-Fork 🍇 v4.0.9")
+    gr.Markdown("# Codename-RVC-Fork 🍇 v4.1.0")
     gr.Markdown(
         "ㅤㅤBased on Applioㅤㅤ"
     )

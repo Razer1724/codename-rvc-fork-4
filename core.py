@@ -436,10 +436,9 @@ def run_preprocess_script(
     clean_strength: float,
     chunk_len: float,
     overlap_len: float,
-    normalization_mode: str = "post_lufs",
+    normalization_mode: str = "post_peak",
     loading_resampling: str = "librosa",
-    target_lufs: float = -20,
-    lufs_range_finder: bool = True,
+    use_smart_cutter: bool = False
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -460,8 +459,7 @@ def run_preprocess_script(
                 overlap_len,
                 normalization_mode,
                 loading_resampling,
-                target_lufs,
-                lufs_range_finder,
+                use_smart_cutter
             ],
         ),
     ]
@@ -536,7 +534,6 @@ def run_train_script(
     use_benchmark: bool = True,
     use_deterministic: bool = False,
     spectral_loss: str = "L1 Mel Loss",
-    use_env_loss: bool = False,
     lr_scheduler: str = "exp decay step",
     exp_decay_gamma: str = "0.999875",
     use_validation: bool = True,
@@ -544,6 +541,7 @@ def run_train_script(
     kl_annealing_cycle_duration: int = 3,
     vits2_mode: bool = False,
     rolling_loss_steps: int = 50,
+    use_tstp: bool = False,
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
@@ -596,7 +594,6 @@ def run_train_script(
                 use_benchmark,
                 use_deterministic,
                 spectral_loss,
-                use_env_loss,
                 lr_scheduler,
                 exp_decay_gamma,
                 use_validation,
@@ -604,6 +601,7 @@ def run_train_script(
                 kl_annealing_cycle_duration,
                 vits2_mode,
                 rolling_loss_steps,
+                use_tstp,
                 use_custom_lr,
                 custom_lr_g,
                 custom_lr_d
@@ -738,11 +736,13 @@ def run_prerequisites_script(
     pretraineds_hifigan: bool,
     models: bool,
     exe: bool,
+    smartcutter: bool,
 ):
     prequisites_download_pipeline(
         pretraineds_hifigan,
         models,
         exe,
+        smartcutter,
     )
     return "Prerequisites installed successfully."
 
@@ -1980,8 +1980,8 @@ def parse_arguments():
         "--normalization_mode",
         type=str,
         help="Normalization mode.",
-        choices=["none", "post_lufs", "post_peak", "post_lufs_vad"],
-        default="post_lufs",
+        choices=["none", "post_peak"],
+        default="post_peak",
         required=False,
     )
     preprocess_parser.add_argument(
@@ -1993,20 +1993,13 @@ def parse_arguments():
         required=True,
     )
     preprocess_parser.add_argument(
-        "--target_lufs",
-        type=float,
-        help="Set target LUFS for loudness normalization",
-        default=-20,
+        "--use_smart_cutter",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Enable SmartCutter silence-truncation during preprocessing.",
+        default=False,
         required=False,
     )
-    preprocess_parser.add_argument(
-        "--lufs_range_finder",
-        type=bool,
-        help="Enable to find the LUFS for your dataset automatically",
-        default=True,
-        required=True,
-    )
-
     # Parser for 'extract' mode
     extract_parser = subparsers.add_parser(
         "extract", help="Extract features from a dataset."
@@ -2263,13 +2256,6 @@ def parse_arguments():
         required=True,
     )
     train_parser.add_argument(
-        "--use_env_loss",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Use envelope loss",
-        default=False,
-    )
-    train_parser.add_argument(
         "--lr_scheduler",
         type=str,
         choices=["exp decay step", "exp decay epoch", "cosine annealing", "none"],
@@ -2317,6 +2303,13 @@ def parse_arguments():
         type=int,
         help="interval for rolling avg loss (in steps).",
         default=50,
+    )
+    train_parser.add_argument(
+        "--use_tstp",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Whether to use Two-Stage Training Protocol ( Freezes encoders, flow, spk emb and speeds up the lr decay. )",
+        default=False,
     )
     train_parser.add_argument(
         "--use_custom_lr",
@@ -2430,7 +2423,13 @@ def parse_arguments():
         default=True,
         help="Download required executables.",
     )
-
+    prerequisites_parser.add_argument(
+        "--smartcutter",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        default=True,
+        help="Download required SmartCutter models.",
+    )
     # Parser for 'audio_analyzer' mode
     audio_analyzer = subparsers.add_parser(
         "audio_analyzer", help="Analyze an audio file."
@@ -2614,8 +2613,7 @@ def main():
                 overlap_len=args.overlap_len,
                 normalization_mode=args.normalization_mode,
                 loading_resampling=args.loading_resampling,
-                target_lufs=args.target_lufs,
-                lufs_range_finder=args.lufs_range_finder
+                use_smart_cutter=args.use_smart_cutter
             )
         elif args.mode == "extract":
             run_extract_script(
@@ -2657,12 +2655,12 @@ def main():
                 use_benchmark=args.use_benchmark,
                 use_deterministic=args.use_deterministic,
                 spectral_loss=args.spectral_loss,
-                use_env_loss=args.use_env_loss,
                 lr_scheduler=args.lr_scheduler,
                 exp_decay_gamma=args.exp_decay_gamma,
                 use_validation=args.use_validation,
                 vits2_mode=args.vits2_mode,
                 rolling_loss_steps=args.rolling_loss_steps,
+                use_tstp=args.use_tstp,
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,

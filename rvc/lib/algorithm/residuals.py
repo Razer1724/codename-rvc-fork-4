@@ -11,7 +11,7 @@ from torch.nn import Conv1d, PReLU
 import torch.nn.functional as F
 
 from rvc.lib.algorithm.wavenet import WaveNet
-from rvc.lib.algorithm.commons import get_padding, init_weights
+from rvc.lib.algorithm.commons import get_padding
 
 from rvc.lib.algorithm.conformer.snake_fused_triton import Snake # Fused Triton variant
 from rvc.lib.algorithm.conformer.activations import SnakeBeta
@@ -83,7 +83,6 @@ class ResBlock_PReLU(torch.nn.Module):
         layers = torch.nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):
@@ -141,7 +140,6 @@ class ResBlock_SnakeBeta(torch.nn.Module):
         layers = torch.nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):
@@ -209,7 +207,6 @@ class ResBlock_Snake_Fused(torch.nn.Module):
         layers = torch.nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):
@@ -277,7 +274,6 @@ class ResBlock_Snake(torch.nn.Module): # Modified
         layers = torch.nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
 
@@ -341,7 +337,6 @@ class ResBlock(torch.nn.Module):
         layers = torch.nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):

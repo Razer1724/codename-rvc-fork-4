@@ -12,11 +12,6 @@ import librosa
 import multiprocessing
 import shutil
 import soundfile as sf
-import pyloudnorm as pyln
-
-import torch
-import torchaudio
-
 import soxr
 from fractions import Fraction
 
@@ -25,6 +20,7 @@ sys.path.append(now_directory)
 
 from rvc.lib.utils import load_audio, load_audio_ffmpeg
 from rvc.train.preprocess.slicer import Slicer
+from rvc.train.preprocess.smartcutter.inference import SmartCutterInterface
 
 import logging
 logger = logging.getLogger(__name__)
@@ -47,7 +43,6 @@ HIGH_PASS_CUTOFF = 48
 SAMPLE_RATE_16K = 16000
 RES_TYPE = "soxr_vhq"
 
-_vad_model_cache = {}
 
 def secs_to_samples(secs, sr):
     """Return an *exact* integer number of samples for `secs` seconds at `sr` Hz.
@@ -57,9 +52,6 @@ def secs_to_samples(secs, sr):
         raise ValueError(f"{secs}s × {sr}Hz is not an integer sample count")
     return frac.numerator
 
-def _init_vad_worker():
-    """Initializes the VAD model once per process."""
-    _get_vad_tooling()
 
 class PreProcess:
     def __init__(self, sr: int, exp_dir: str):
@@ -129,10 +121,15 @@ class PreProcess:
         while i < len(audio):
             chunk = audio[i : i + chunk_len_smpl]
 
-            # If the last slice's below 3 seconds, discard it.
+            # If the last slice's below 3 seconds, we're padding it to 3 secs.
             if len(chunk) < chunk_len_smpl:
-                logger.warning(f"The last resulting slice ({sid}-{idx0}-{slice_idx}) is too short: {len(chunk)} < {chunk_len_smpl} samples - Discarding!")
-                break
+                padding_needed = chunk_len_smpl - len(chunk)
+                if len(chunk) > self.sr * 1.0: 
+                    padding = np.zeros(padding_needed, dtype=np.float32)
+                    chunk = np.concatenate((chunk, padding))
+                    logger.info(f"Padded final slice {sid}_{idx0}_{slice_idx} with {padding_needed} samples.")
+                else:
+                    break
 
             # Saving slices
             wavfile.write(
@@ -242,67 +239,7 @@ def _process_audio_worker(args):
         loading_resampling,
     )
 
-def _process_and_save_vad_worker(args):
-    file_name, target_lufs, gt_wavs_dir, wavs16k_dir = args
-    try:
-        # Process Ground Truth
-        gt_path = os.path.join(gt_wavs_dir, file_name)
-        gt_audio, gt_sr = sf.read(gt_path)
-        
-        current_lufs = _measure_vad_lufs(gt_audio, gt_sr)
-        gt_normalized = pyln.normalize.loudness(gt_audio, current_lufs, target_lufs)
-        
-        # Check for clipping
-        if np.abs(gt_normalized).max() > 1.0:
-            gt_normalized = gt_normalized / np.abs(gt_normalized).max() * 0.99
-            
-        wavfile.write(gt_path, gt_sr, gt_normalized.astype(np.float32))
-
-        # Process 16k version
-        k16_path = os.path.join(wavs16k_dir, file_name)
-        k16_audio, k16_sr = sf.read(k16_path)
-        k16_normalized = pyln.normalize.loudness(k16_audio, current_lufs, target_lufs)
-        
-        if np.abs(k16_normalized).max() > 1.0:
-            k16_normalized = k16_normalized / np.abs(k16_normalized).max() * 0.99
-
-        wavfile.write(k16_path, k16_sr, k16_normalized.astype(np.float32))
-    except Exception as e:
-        logger.error(f"Error in VAD normalization for {file_name}: {e}")
-
 def _process_and_save_worker(args):
-    file_name, final_lufs_target, gt_wavs_dir, wavs16k_dir = args
-    try:
-        # Process ground truth audio
-        gt_path = os.path.join(gt_wavs_dir, file_name)
-        gt_audio, gt_sr = sf.read(gt_path)
-
-        meter = pyln.Meter(gt_sr, block_size=0.200)
-        loudness = meter.integrated_loudness(gt_audio)
-        gt_normalized = pyln.normalize.loudness(gt_audio, loudness, final_lufs_target)
-
-        if np.abs(gt_normalized).max() > 1.0:
-            raise ValueError(f"Normalization resulted in clipping for {file_name}")
-
-        wavfile.write(gt_path, gt_sr, gt_normalized.astype(np.float32))
-
-        # Process 16k audio
-        k16_path = os.path.join(wavs16k_dir, file_name)
-        k16_audio, k16_sr = sf.read(k16_path)
-
-        meter = pyln.Meter(k16_sr, block_size=0.200)
-        loudness = meter.integrated_loudness(k16_audio)
-        k16_normalized = pyln.normalize.loudness(k16_audio, loudness, final_lufs_target)
-
-        if np.abs(k16_normalized).max() > 1.0:
-            raise ValueError(f"Normalization resulted in clipping for {file_name} (16k)")
-
-        wavfile.write(k16_path, k16_sr, k16_normalized.astype(np.float32))
-    except Exception as e:
-        logger.error(f"Error normalizing {file_name}: {e}")
-        raise e
-
-def _process_and_save_classic_worker(args):
     file_name, gt_wavs_dir, wavs16k_dir = args
     try:
         # Process ground truth audio
@@ -334,121 +271,6 @@ def _process_and_save_classic_worker(args):
     except Exception as e:
         logger.error(f"Error classic normalizing {file_name}: {e}")
         raise e
-
-def _measure_lufs_and_peak_worker(file_path):
-    try:
-        audio, sr = sf.read(file_path)
-        
-        # Return negative infinity for silent clips to ignore them
-        if np.max(np.abs(audio)) == 0:
-            return -np.inf, -np.inf
-
-        meter = pyln.Meter(sr, block_size=0.200)
-        integrated_loudness = meter.integrated_loudness(audio)
-        
-        # This measures the sample peak, not the "True Peak", but it's what's needed for preventing digital clipping.
-        sample_peak = 20 * np.log10(np.max(np.abs(audio)))
-        return integrated_loudness, sample_peak
-    except Exception as e:
-        logger.error(f"Error measuring loudness for {file_path}: {e}")
-        return None
-
-
-def _measure_vad_lufs_and_peak_worker(file_path):
-    try:
-        audio, sr = sf.read(file_path)
-        if np.max(np.abs(audio)) == 0:
-            return -np.inf, -np.inf
-
-        vad_lufs = _measure_vad_lufs(audio, sr) 
-        sample_peak = 20 * np.log10(np.max(np.abs(audio)))
-
-        return vad_lufs, sample_peak
-    except Exception as e:
-        logger.error(f"Error measuring VAD levels for {file_path}: {e}")
-        return None
-
-
-def _get_vad_tooling():
-    if "model" not in _vad_model_cache:
-        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, trust_repo=True)
-        _vad_model_cache["model"] = model
-        _vad_model_cache["utils"] = utils
-    return _vad_model_cache["model"], _vad_model_cache["utils"]
-
-def _measure_vad_lufs(audio, sr):
-    model, utils = _get_vad_tooling()
-    (get_speech_timestamps, _, _, _, collect_chunks) = utils
-    
-    # Silero VAD requires 16k sample rate for analysis
-    audio_16k = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-    tensor_audio = torch.from_numpy(audio_16k).float()
-    
-    speech_timestamps = get_speech_timestamps(tensor_audio, model, sampling_rate=16000)
-    
-    if not speech_timestamps:
-        # Fallback to standard integrated LUFS if no speech detected
-        meter = pyln.Meter(sr, block_size=0.200)
-        return meter.integrated_loudness(audio)
-        
-    # Measure LUFS of ONLY the speech chunks
-    speech_chunks = collect_chunks(speech_timestamps, tensor_audio).numpy()
-    meter_vad = pyln.Meter(16000, block_size=0.200)
-    return meter_vad.integrated_loudness(speech_chunks)
-
-def normalize_sliced_audio(
-    exp_dir: str,
-    target_lufs: float,
-    lufs_range_finder: bool,
-    num_processes: int,
-):
-    gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
-    wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
-
-    audio_files = [f for f in os.listdir(gt_wavs_dir) if f.endswith(".wav")]
-    audio_files.sort()
-
-    final_lufs_target = target_lufs
-    if lufs_range_finder:
-        logger.info("Starting LUFS and Peak measurement dry run...")
-
-        file_paths = [os.path.join(gt_wavs_dir, f) for f in audio_files]
-        with multiprocessing.Pool(processes=num_processes) as pool:
-            results = list(tqdm(pool.imap_unordered(_measure_lufs_and_peak_worker, file_paths), total=len(file_paths), desc="Measuring Audio Levels"))
-        
-        valid_loudness_and_peaks = [r for r in results if r is not None and r[0] > -np.inf and r[1] > -np.inf]
-        
-        if not valid_loudness_and_peaks:
-            logger.error("No valid audio levels could be measured. Aborting normalization.")
-            return
-
-        safety_margin_db = -1.0
-        potential_safe_targets = []
-        for lufs, peak in valid_loudness_and_peaks:
-            gain_to_safe_peak = safety_margin_db - peak
-            potential_target_lufs = lufs + gain_to_safe_peak
-            potential_safe_targets.append(potential_target_lufs)
-
-
-        safe_lufs_target = min(potential_safe_targets)
-        final_lufs_target = safe_lufs_target
-        
-        loudest_lufs_original = max(r[0] for r in valid_loudness_and_peaks)
-        highest_peak_original = max(r[1] for r in valid_loudness_and_peaks)
-        
-        logger.info(f"Loudest audio segment measured at: {loudest_lufs_original:.2f} LUFS.")
-        logger.info(f"Highest sample peak measured at: {highest_peak_original:.2f} dBFS.")
-        logger.info(f"Calculated safe normalization target to avoid clipping is: {safe_lufs_target:.2f} LUFS.")
-
-    logger.info(f"Starting Loudness Normalization with LUFS target: {final_lufs_target:.2f} LUFS")
-
-    arg_list = [(file_name, final_lufs_target, gt_wavs_dir, wavs16k_dir) for file_name in audio_files]
-
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        list(tqdm(pool.imap_unordered(_process_and_save_worker, arg_list), total=len(audio_files), desc="Loudness Normalization"))
-
-    logger.info("Loudness Normalization complete.")
-
 
 def format_duration(seconds):
     hours = int(seconds // 3600)
@@ -485,6 +307,51 @@ def cleanup_dirs(exp_dir):
         logger.info(f"Deleted directory: {wavs16k_dir}")
 
 
+def run_smart_cutter_stage(input_root, exp_dir, sr):
+    """
+    Stage 1: Sequential GPU processing.
+    Reads from input_root, writes to 'smart_cut_temp' inside exp_dir.
+    Returns the path to the NEW input root (the temp folder).
+    """
+    ckpt_dir = os.path.join(now_directory, r"rvc/models/smartcutter")
+    output_root = os.path.join(exp_dir, "smart_cut_temp")
+    os.makedirs(output_root, exist_ok=True)
+
+    print("[SmartCutter] Starting .. this may take a bit ... ")
+    print(f"[SmartCutter] Original Input: {input_root}")
+    print(f"[SmartCutter] Temp Output: {output_root}")
+
+    # Initialize Interface
+    engine = SmartCutterInterface(sr, ckpt_dir)
+    engine.load_model()
+
+    files_to_process = []
+    # Scan files
+    for root, _, filenames in os.walk(input_root):
+        for f in filenames:
+            if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
+                full_path = os.path.join(root, f)
+
+                # Replicate folder structure in temp dir
+                rel_path = os.path.relpath(full_path, input_root)
+                out_path = os.path.join(output_root, rel_path)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+                files_to_process.append((full_path, out_path))
+
+    # Process Loop
+    with tqdm(total=len(files_to_process), desc="SmartCutting") as pbar:
+        for in_p, out_p in files_to_process:
+            engine.process_file(in_p, out_p)
+            pbar.update(1)
+
+    # Cleanup GPU
+    engine.unload()
+    print("SmartCutter Stage Complete. Proceeding to Slicing...")
+
+    return output_root
+
+
 def preprocess_training_set(
     input_root: str,
     sr: int,
@@ -498,148 +365,150 @@ def preprocess_training_set(
     overlap_len: float,
     normalization_mode: str,
     loading_resampling: str,
-    target_lufs: float,
-    lufs_range_finder: bool
+    use_smart_cutter: bool
 ):
     start_time = time.time()
-    if normalization_mode == "post_lufs_vad" or lufs_range_finder:
-        logger.info("Ensuring VAD model is downloaded and cached...")
-        _get_vad_tooling()
-    logger.info(f"Starting preprocess with {num_processes} processes...")
 
-    files = []
-    idx = 0
-    for root, _, filenames in os.walk(input_root):
+    sc_engine = None
+    if use_smart_cutter:
         try:
-            sid = 0 if root == input_root else int(os.path.basename(root))
-            for f in filenames:
-                if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
-                    files.append((os.path.join(root, f), idx, sid))
-                    idx += 1
-        except ValueError:
-            logger.warning(
-                f'Speaker ID folder is expected to be integer, got "{os.path.basename(root)}" instead.'
-            )
+            ckpt_dir = os.path.join(now_directory, r"rvc/models/smartcutter")
+            sc_engine = SmartCutterInterface(sr, ckpt_dir)
+            sc_engine.load_model()
+            logger.info("SmartCutter model loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load SmartCutter: {e}")
+            return
 
+    speaker_map = {}
+
+    root_files = [f for f in os.listdir(input_root) if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac"))]
+    if root_files:
+        speaker_map[input_root] = [os.path.join(input_root, f) for f in root_files]
+
+    for root, dirs, filenames in os.walk(input_root):
+        if root == input_root:
+            continue
+
+        audio_files = [os.path.join(root, f) for f in filenames if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac"))]
+        if audio_files:
+            speaker_map[root] = audio_files
+
+    speaker_count = len(speaker_map)
+
+    if speaker_count > 1:
+        detected_sids = set()
+        for folder_path in speaker_map.keys():
+            if folder_path == input_root:
+                detected_sids.add(0)
+            else:
+                try:
+                    folder_name = os.path.basename(folder_path)
+                    sid = int(folder_name.split('_')[0])
+                    detected_sids.add(sid)
+                except (ValueError, IndexError):
+                    logger.error(f"FATAL: Folder '{folder_name}' is invalid for multi-speaker. "
+                                 f"Folders must start with an integer (e.g., '0_name').")
+                    sys.exit(1)
+
+        expected_sids = set(range(speaker_count))
+        if detected_sids != expected_sids:
+            missing = sorted(list(expected_sids - detected_sids))
+            logger.error(f"FATAL: Speaker IDs are not contiguous or missing 0. "
+                         f"Detected: {sorted(list(detected_sids))}. Missing: {missing}")
+            sys.exit(1)
+        else:
+            logger.info("Contiguity check passed.")
+
+    logger.info(f"Found {speaker_count} speakers to process.")
     cleanup_dirs(exp_dir)
 
-    arg_list = [
-        (
-            file_path,
-            idx0,
-            sid,
-            sr,
-            exp_dir,
-            cut_preprocess,
-            process_effects,
-            noise_reduction,
-            reduction_strength,
-            chunk_len,
-            overlap_len,
-            loading_resampling,
-        )
-        for (file_path, idx0, sid) in files
-    ]
 
-    audio_lengths = []
-    try:
-        with tqdm(total=len(arg_list), desc="Slicing & Resampling") as pbar:
-            with multiprocessing.Pool(processes=num_processes) as pool:
-                for result in pool.imap_unordered(_process_audio_worker, arg_list):
-                    if result:
-                        audio_lengths.append(result)
-                    pbar.update(1)
+    total_audio_length = 0
 
-        total_audio_length = sum(audio_lengths)
-        save_dataset_duration(os.path.join(exp_dir, "model_info.json"), total_audio_length)
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        for speaker_dir, audio_paths in tqdm(speaker_map.items(), desc="Processing Speakers"):
 
-    except Exception as e:
-        logger.error(f"Slicing and resampling failed: {e}. Aborting.")
-        cleanup_dirs(exp_dir)
-        return
+            temp_speaker_dir = None
+            current_batch_paths = []
+            try:
+                if speaker_dir == input_root:
+                    sid = 0
+                else:
+                    folder_name = os.path.basename(speaker_dir)
+                    sid_str = folder_name.split('_')[0] 
+                    sid = int(sid_str)
+            except (ValueError, IndexError):
+                logger.warning(f"Folder '{os.path.basename(speaker_dir)}' does not start with a valid integer ID. Using SID 0.")
+                sid = 0
 
-    if normalization_mode == "post_lufs":
-        logger.info("Loudness Normalization enabled. Initiating...")
-        try:
-            normalize_sliced_audio(
-                exp_dir,
-                target_lufs,
-                lufs_range_finder,
-                num_processes
-            )
-        except Exception as e:
-            logger.error(f"Normalization failed: {e}. Aborting.")
-            cleanup_dirs(exp_dir)
-            return
+            if use_smart_cutter and sc_engine:
+                temp_speaker_dir = os.path.join(exp_dir, "smart_cut_temp", str(sid))
+                os.makedirs(temp_speaker_dir, exist_ok=True)
 
-    if normalization_mode == "post_lufs_vad":
-        logger.info("Advanced VAD-gated Loudness Normalization enabled.")
-        gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
-        wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
-        audio_files = [f for f in os.listdir(gt_wavs_dir) if f.endswith(".wav")]
+                for file_path in audio_paths:
+                    filename = os.path.basename(file_path)
+                    out_path = os.path.join(temp_speaker_dir, filename)
 
-        final_target = target_lufs
+                    sc_engine.process_file(file_path, out_path)
+                    current_batch_paths.append(out_path)
+            else:
+                current_batch_paths = audio_paths
 
-        if lufs_range_finder:
-            logger.info("Starting VAD-aware dry run...")
-            file_paths = [os.path.join(gt_wavs_dir, f) for f in audio_files]
+            arg_list = [
+                (
+                    f_path,
+                    idx,
+                    sid,
+                    sr,
+                    exp_dir,
+                    cut_preprocess,
+                    process_effects,
+                    noise_reduction,
+                    reduction_strength,
+                    chunk_len,
+                    overlap_len,
+                    loading_resampling,
+                )
+                for idx, f_path in enumerate(current_batch_paths)
+            ]
 
-            with multiprocessing.Pool(processes=num_processes) as pool:
-                results = list(tqdm(pool.imap_unordered(_measure_vad_lufs_and_peak_worker, file_paths), 
-                                    total=len(file_paths), desc="Analyzing Speech Peaks"))
-            valid_stats = [r for r in results if r is not None and r[0] > -np.inf]
+            for result in pool.imap_unordered(_process_audio_worker, arg_list):
+                if result:
+                    total_audio_length += result
 
-            if valid_stats:
-                safety_margin_db = -1.0
-                potential_targets = []
-                for v_lufs, peak in valid_stats:
-                    gain_to_safe_peak = safety_margin_db - peak
-                    potential_targets.append(v_lufs + gain_to_safe_peak)
+            if temp_speaker_dir and os.path.exists(temp_speaker_dir):
+                shutil.rmtree(temp_speaker_dir)
 
-                final_target = min(potential_targets)
-                logger.info(f"VAD Range Finder calculated a safe speech target of: {final_target:.2f} LUFS")
+    main_temp_dir = os.path.join(exp_dir, "smart_cut_temp")
+    if os.path.exists(main_temp_dir):
+        shutil.rmtree(main_temp_dir)
+        
+    if use_smart_cutter and sc_engine:
+        sc_engine.unload()
 
-        arg_list = [(f, final_target, gt_wavs_dir, wavs16k_dir) for f in audio_files]
+    save_dataset_duration(os.path.join(exp_dir, "model_info.json"), total_audio_length)
 
-        try:
-            with multiprocessing.Pool(
-                processes=num_processes,
-                initializer=_init_vad_worker
-            ) as pool:
-                list(tqdm(pool.imap_unordered(_process_and_save_vad_worker, arg_list), 
-                            total=len(audio_files), desc="VAD Normalization"))
-        except Exception as e:
-            logger.error(f"VAD Normalization failed: {e}. Aborting.")
-            cleanup_dirs(exp_dir)
-            return
-
-    elif normalization_mode == "post_peak":
+    if normalization_mode == "post_peak":
         logger.info("Classic Peak Normalization enabled. Initiating...")
         gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
         wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
+
         audio_files = [f for f in os.listdir(gt_wavs_dir) if f.endswith(".wav")]
         audio_files.sort()
 
         arg_list = [(file_name, gt_wavs_dir, wavs16k_dir) for file_name in audio_files]
 
-        try:
-            with multiprocessing.Pool(processes=num_processes) as pool:
-                list(tqdm(pool.imap_unordered(_process_and_save_classic_worker, arg_list), total=len(audio_files), desc="Peak Normalization"))
-        except Exception as e:
-            logger.error(f"Peak Normalization failed: {e}. Aborting.")
-            cleanup_dirs(exp_dir)
-            return
-    else:
-        logger.info("Normalization disabled. Skipping normalization phase.")
+        with multiprocessing.Pool(processes=num_processes) as pool:
+             list(tqdm(pool.imap_unordered(_process_and_save_worker, arg_list), total=len(audio_files), desc="Peak Normalization"))
 
     elapsed_time = time.time() - start_time
     logger.info(f"Preprocessing completed in {elapsed_time:.2f} seconds "
                 f"on {format_duration(total_audio_length)} of audio.")
 
-
 if __name__ == "__main__":
-    if len(sys.argv) < 15:
-        print("Usage: python preprocess.py <experiment_directory> <input_root> <sample_rate> <num_processes or 'none'> <cut_preprocess> <process_effects> <noise_reduction> <reduction_strength> <chunk_len> <overlap_len> <normalization_mode> <loading_resampling> <target_lufs> <lufs_range_finder>")
+    if len(sys.argv) < 14:
+        print("Usage: python preprocess.py <experiment_directory> <input_root> <sample_rate> <num_processes or 'none'> <cut_preprocess> <process_effects> <noise_reduction> <reduction_strength> <chunk_len> <overlap_len> <normalization_mode> <loading_resampling> <use_smart_cutter>")
         sys.exit(1)
     experiment_directory = str(sys.argv[1])
     input_root = str(sys.argv[2])
@@ -659,8 +528,7 @@ if __name__ == "__main__":
     overlap_len = float(sys.argv[10])
     normalization_mode = str(sys.argv[11])
     loading_resampling = str(sys.argv[12])
-    target_lufs = float(sys.argv[13])
-    lufs_range_finder = bool(strtobool(sys.argv[14]))
+    use_smart_cutter = bool(strtobool(sys.argv[13]))
 
     preprocess_training_set(
         input_root,
@@ -675,6 +543,5 @@ if __name__ == "__main__":
         overlap_len,
         normalization_mode,
         loading_resampling,
-        target_lufs,
-        lufs_range_finder
+        use_smart_cutter
     )

@@ -63,7 +63,6 @@ def refresh_custom_pretraineds():
         {"choices": sorted(get_pretrained_list("D")), "__type__": "update"},
     )
 
-# Dataset Creator
 datasets_path = os.path.join(now_dir, "assets", "datasets")
 
 if not os.path.exists(datasets_path):
@@ -340,7 +339,7 @@ def train_tab():
                 vocoder_arch = gr.State("hifi_refine")
                 optimizer = gr.Radio(
                     label="Optimizer",
-                    info="Choose an optimizer used in training: \n ( If unsure, just leave it as it is or try these in this order: AdamW -> AdamSPD -> RAdam. ) \n- **AdamW BF16:** Good and reliable. ( BF16 ver. )  \n- **AdamW:** Normal AdamW. ( **Use the BF16 version unless you train in FP32-only or FP16** ) \n- **RAdam:** Rectified Adam. ( **Can help** with early instability - **Most likely slower convergence** ) \n- **AdamSPD:** Adam with SPD. ( SPD: New weight-decay technique **tailored for fine-tuning.** ) \n- **Ranger21:** AdamW + LookAhead and few more extras. ( **Most likely unstable** ) \n- **DiffGrad:** An optimizer with CNN in mind. ( **Probs** a good AdamW alternative - **For finetuning** ) \n- **Prodigy:** A self-tuning optimizer. Lr will adapt automatically ( **Don't touch the lr** )",
+                    info="Choose an optimizer used in training: \n ( If unsure, just leave it as it is or try these in this order: AdamW -> RAdam -> AdamSPD. ) \n- **AdamW BF16:** Good and reliable. ( BF16 ver. )  \n- **AdamW:** Normal AdamW. ( **Use the BF16 version unless you train in FP32-only or FP16** ) \n- **RAdam:** Rectified Adam. ( **Can help** with early instability - **Most likely slower convergence** ) \n- **AdamSPD:** Adam with SPD. ( SPD: New weight-decay technique **tailored for fine-tuning.** ) \n- **Ranger21:** AdamW + LookAhead and few more extras. ( **Most likely unstable** ) \n- **DiffGrad:** An optimizer with CNN in mind. ( **Probs** a good AdamW alternative - **For finetuning** ) \n- **Prodigy:** A self-tuning optimizer. Lr will adapt automatically ( **Don't touch the lr** )",
                     choices=initial_optimizer_choices,
                     value=initial_optimizer,
                     interactive=True,
@@ -416,44 +415,40 @@ def train_tab():
             interactive=True,
             key='dataset_path'
         )
-        dataset_creator = gr.Checkbox(
-            label="Dataset Creator",
-            value=False,
-            interactive=True,
-            visible=True,
-        )
-        with gr.Column(visible=False) as dataset_creator_settings:
-            with gr.Accordion("Dataset Creator"):
-                dataset_name = gr.Textbox(
-                    label="Dataset Name",
-                    info="Name of the new dataset.",
-                    placeholder="Enter dataset name",
-                    interactive=True,
-                )
-                upload_audio_dataset = gr.File(
-                    label="Upload Audio Dataset",
-                    type="filepath",
-                    interactive=True,
-                )
         refresh = gr.Button("Refresh")
 
         with gr.Accordion("Advanced Settings for the preprocessing step", open=True):
             gr.Markdown(
             """
              
+             <br/>
              
-            **The provided default settings are optimal for anyone as long:**
+            ### **SmartCutter / Truncated-Audio approach:**
              
-            + Your dataset is a " 1 file " type ( Say, fused all smaller samples / chunks into 1 .wav file )
-            + Your dataset doesn't have peaks going crazy haywire ( tl;dr - You don't operate on source/dynamics-inconsistent samples )
-            + You performed silence-truncation the right way
+            #### Requirements:
+            + Your dataset is a **" fused dataset "** type ( Means, you concatenated / joined up all smaller samples / chunks into 1 continuous audio file )
+            + You keep "SmartCutter" enabled ( My machine-learning solution to 'silence truncation'. ) <br/> ⚠ ( **or** you made sure your audio is silence-truncated. )
              
+             <br/>
              
-            ( If your set has major peak / consistency issues, I recommend learning about " Peak taming compression ". )
-            <br>
-            (( Generally.. you shouldn't tweak these unless you know what and why you're doing it. ))
-            <br>
-            ((( The only exception would be for " DC / high-pass filtering " and " Noise Reduction " ~ Read their description. )))
+            ### **Otherwise you likely should go with:**
+             
+            + SmartCutter:  Set it to "Disabled"
+            + Audio cutting:  "Automatic"
+            <br/> ⚠ ( Yet I'd still recommend to go with approach the first approach. It provides ***much better and more consistent*** results.
+             
+             <br/>
+             
+            ` NOTES ` <br/>
+            0. Remember, a really good dataset makes 50% of the model creation workflow. If you use awful datasets, don't expect miracle results.
+             
+            1. If your set has major peak / consistency issues, I recommend reading up on " Peak taming compression ".
+             
+            2. Generally.. you shouldn't tweak these default settings unless you know you're doing it.
+             
+            3. The only exception ( sub-point 2 ) would be for " DC / high-pass filtering " and " Noise Reduction " ~ Read their description.
+             
+            4. If SmartCutter causes issues for your set ( cut words and so on. ), fallback to classical silence truncation. <br/> ( You can use Audacity for that. )
             """
             )
             with gr.Row():
@@ -463,39 +458,30 @@ def train_tab():
                     choices=["librosa", "ffmpeg"],
                     value="librosa",
                     interactive=True,
-                    scale=1.45,
+                    #scale=1.45,
                     key='loading_resampling'
+                )
+                use_smart_cutter = gr.Checkbox(
+                    label="SmartCutter",
+                    info="**Machine-Learning solution to silence truncation** \n Created especially with this fork in mind. \n - Automatically truncates the silences ( Ensuring min. 100ms spacings ) \n - Doesn't damage word-tails or inter-phonetic gaps ( unlike gating ) \n - Truncated areas are automatically replaced by pure silence \n ( in case of noise-contamination between words or sentences. ) \n - Tries to heavily respect breathing. \n ⚠ **Due to technical limitations, multi-spk processing will be slower.**",
+                    value=True,
+                    interactive=True,
+                    visible=True,
+                    key='use_smart_cutter'
                 )
                 normalization_mode = gr.Radio(
                     label="Loudness Normalization",
-                    info="- **none:** Disabled \n ( Select this if the files are already normalized. ) \n- **post_lufs:** PyLoud Post-Normalization \n ( Loudness norm. of each sliced segment. ) \n- **post_lufs_vad:** Silero VAD + PyLoud Post-Normalization \n ( Loudness norm. of each sliced segment. ) \n- **post_peak:** Peak Post-Normalization \n ( Peak [ 0.95] norm of each sliced segment. ) \n ",
-                    choices=["none", "post_lufs", "post_lufs_vad", "post_peak"],
-                    value="post_lufs_vad",
+                    info="- **none:** Disabled \n ( Select this if the files are already normalized. ) \n- **post_peak:** Peak Post-Normalization \n ( Peak [ * 0.95] norm of each sliced segment. )",
+                    choices=["none", "post_peak"],
+                    value="post_peak",
                     interactive=True,
                     visible=True,
                     key='normalization_mode'
                 )
-                target_lufs = gr.Number(
-                    label="Target LUFS",
-                    info="Specify **target LUFS** for: \n 'pyloudnorm' loudness normalization. \n \n **If unsure what it does:** \n - **1. Keep LUFS finder enabled.** \n - **2. Forget 'bout this box :>**",
-                    value=-20.0,
-                    interactive=True,
-                    scale=0.9,
-                    key='target_lufs'
-                )
-                lufs_range_finder = gr.Checkbox(
-                    label="LUFS range finder",
-                    info="Enable to automatically: \n - Find the LUFS **for your dataset.** \n( Just sit back and relax :> ) \n \n Disable ONLY IF: \n - **You know** what LUFS to use. \n ",
-                    value=True,
-                    interactive=True,
-                    visible=True,
-                    scale=0.8,
-                    key='lufs_range_finder'
-                )
             with gr.Row():
                 cut_preprocess = gr.Radio(
                     label="Audio cutting",
-                    info="Audio file slicing-method selection:\n - **Skip** - if the files are already pre-sliced and properly processed. \n- **Simple** - If your dataset is already silence-truncated. \n- **Automatic** - for automatic silence detection and slicing around it. \n\n **It is advised to have the dataset properly silence-truncated and to use the 'Simple' method.** \n **(PS. Automatic is crap ~ I advise against it. )**",
+                    info="Audio file slicing-method selection:\n - **Skip** - if the files are already pre-sliced and properly normalized. \n- **Simple** - If your dataset is already silence-truncated. \n- **Automatic** - for automatic silence detection and slicing around it. \n\n **It is advised to go with 'SmartCutter' approach.** \n **( PS. Automatic is pretty crap. I advise against it unless your set's clean and you can't bother truncating it. )**",
                     choices=["Skip", "Simple", "Automatic"],
                     value="Simple",
                     interactive=True,
@@ -526,7 +512,7 @@ def train_tab():
             with gr.Column():
                 process_effects = gr.Checkbox(
                     label="DC / high-pass filtering",
-                    info="**Applies high-pass filtering to get rid of low-freq. noise, DC offset and some Rumble. ( Disable if your dataset is already high-pass filtered. )**",
+                    info="**Applies high-pass filtering to get rid of low-frequency noise, DC offset and some Rumble. ( Disable if your dataset is already high-pass filtered. )**",
                     value=True,
                     interactive=True,
                     visible=True,
@@ -576,8 +562,7 @@ def train_tab():
                     overlap_len,
                     normalization_mode,
                     loading_resampling,
-                    target_lufs,
-                    lufs_range_finder,
+                    use_smart_cutter
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -678,7 +663,7 @@ def train_tab():
             )
             epoch_save_frequency = gr.Slider(
                 1,
-                5000,
+                100,
                 1,
                 step=1,
                 label="Saving frequency",
@@ -771,13 +756,6 @@ def train_tab():
                         interactive=True,
                         key='spectral_loss'
                     )
-                    use_env_loss = gr.Checkbox(
-                        label="Use envelope loss",
-                        info="Enables envelope loss during training. \n Helps match volume peaks and troughs, improving waveform transients, phase consistency, and overall audio clarity. Disabled by default. \n**Required for PCPH-GAN.**",
-                        value=False,
-                        interactive=True,
-                        key='use_env_loss'
-                    )
                     lr_scheduler = gr.Radio(
                         label="Learning rate scheduler",
                         info="- **exp decay:** Decays the lr exponentially - **Safe default.** \n **( 'step' variant decays per step, 'epoch' per epoch. For finetuning per-step is recommended. )** \n- **cosine annealing:** Cosine annealing schedule - **Optional alternative.** \n- **none:** No scheduler - **For debugging or developing.**",
@@ -796,8 +774,8 @@ def train_tab():
                         key='exp_decay_gamma'
                     )
                     use_kl_annealing = gr.Checkbox(
-                        label="Use KL loss annealing",
-                        info="Enables cyclic KL loss annealing for training. \n **Might potentially** mitigate overfitting on smaller datasets and generally should help with convergence. \n **Experimental**",
+                        label="KL loss annealing",
+                        info="Enables cyclic KL loss annealing for training. \n **Might potentially** mitigate overfitting on smaller datasets and generally should help with convergence. \n **(EXPERIMENTAL)**",
                         value=False,
                         interactive=True,
                         key='use_kl_annealing'
@@ -823,6 +801,13 @@ def train_tab():
                         interactive=True,
                         visible=True,
                         key='rolling_loss_steps'
+                    )
+                    use_tstp = gr.Checkbox(
+                        label="Two-Stage Training Protocol",
+                        info="Enables 'TSTP' ( Might be potentially useful for small datasets. ) \n Once encoders loss ( kl ) reaches '0.1': \n - Freezes: Encoders, Flow, Spk emb \n - Speeds up lr decay by 50% ( Exponential lr decay only. ) \n **(EXPERIMENTAL)**",
+                        value=False,
+                        interactive=True,
+                        key='use_tstp'
                     )
             with gr.Column():
                 custom_pretrained = gr.Checkbox(
@@ -986,7 +971,6 @@ def train_tab():
                     use_benchmark,
                     use_deterministic,
                     spectral_loss,
-                    use_env_loss,
                     lr_scheduler,
                     exp_decay_gamma,
                     use_validation,
@@ -994,6 +978,7 @@ def train_tab():
                     kl_annealing_cycle_duration,
                     vits2_mode,
                     rolling_loss_steps,
+                    use_tstp,
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
@@ -1198,8 +1183,7 @@ def train_tab():
                 architecture, optimizer, adversarial_loss, vocoder, sampling_rate, cpu_threads, extract_gpu,
 
                 # Preprocessing
-                dataset_path, loading_resampling, normalization_mode,
-                target_lufs, lufs_range_finder, cut_preprocess,
+                dataset_path, loading_resampling, use_smart_cutter, normalization_mode, cut_preprocess,
                 chunk_len, overlap_len, process_effects,
                 noise_reduction, clean_strength,
 
@@ -1211,13 +1195,13 @@ def train_tab():
                 batch_size, epoch_save_frequency, total_epoch_count,
                 save_only_latest_net_models, save_weight_models, pretrained,
                 cleanup, use_checkpointing,
-                use_tf32, use_benchmark, use_deterministic, spectral_loss, use_env_loss,
+                use_tf32, use_benchmark, use_deterministic, spectral_loss,
                 lr_scheduler, exp_decay_gamma, use_validation,
                 custom_pretrained, g_pretrained_path,
                 d_pretrained_path, multiple_gpu, training_gpu, use_warmup,
                 warmup_duration, use_custom_lr, custom_lr_g,
-                custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration,
-                index_algorithm
+                custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
+                rolling_loss_steps, use_tstp, index_algorithm, use_kl_annealing
             ])
 
             def save_training_preset(inputs):
@@ -1289,16 +1273,6 @@ def train_tab():
                 fn=refresh_models_and_datasets,
                 inputs=[],
                 outputs=[model_name, dataset_path],
-            )
-            dataset_creator.change(
-                fn=toggle_visible,
-                inputs=[dataset_creator],
-                outputs=[dataset_creator_settings],
-            )
-            upload_audio_dataset.upload(
-                fn=save_drop_dataset_audio,
-                inputs=[upload_audio_dataset, dataset_name],
-                outputs=[upload_audio_dataset, dataset_path],
             )
             embedder_model.change(
                 fn=toggle_visible_embedder_custom,

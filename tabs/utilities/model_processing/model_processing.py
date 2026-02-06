@@ -51,6 +51,7 @@ def extract_small_model(
                 "f0": int(pitch_guidance),
                 "version": version,
                 "creation_date": datetime.datetime.now().isoformat(),
+                "speakers_id": opt["config"][15] if len(opt["config"]) > 15 else 1,
             }
         )
 

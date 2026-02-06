@@ -7,10 +7,16 @@ import sys
 import torch
 import torch.distributed as dist
 from torch.nn import functional as F
+
 import numpy as np
 import soundfile as sf
+
 from collections import OrderedDict
+
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.cm as cm
+
 
 MATPLOTLIB_FLAG = False
 
@@ -43,75 +49,20 @@ def replace_keys_in_dict(d, old_key_part, new_key_part):
     return updated_dict
 
 
-def load_checkpoint(architecture, checkpoint_path, model, optimizer=None, load_opt=1):
-    """
-    Load a checkpoint into a model and optionally the optimizer.
-
-    Args:
-        architecture (str): Chosen architecture for training.
-        checkpoint_path (str): Path to the checkpoint file.
-        model (torch.nn.Module): The model to load the checkpoint into.
-        optimizer (torch.optim.Optimizer, optional): The optimizer to load the state from. Defaults to None.
-        load_opt (int, optional): Whether to load the optimizer state. Defaults to 1.
-    """
-    assert os.path.isfile(checkpoint_path), f"Checkpoint file not found: {checkpoint_path}"
-
+def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
+    assert os.path.isfile(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
     checkpoint_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
-    # Backwards compatibility for mainline for "RVC" architecture
-    if architecture == "RVC":
-        checkpoint_dict = replace_keys_in_dict(
-            checkpoint_dict, 
-            ".weight_v", 
-            ".parametrizations.weight.original1"
-        )
-        checkpoint_dict = replace_keys_in_dict(
-            checkpoint_dict, 
-            ".weight_g", 
-            ".parametrizations.weight.original0"
-        )
-
-    # Safety check / fix for Future RingFormer and RefineGAN models that were saved before the better key handling was added:
-    if architecture != "RVC":
-        if any(key.endswith(".weight_v") for key in checkpoint_dict["model"].keys()) and any(key.endswith(".weight_g") for key in checkpoint_dict["model"].keys()):
-            print(f"[WARNING] Detected {architecture} architecture, fixing keys by converting .weight_v and .weight_g back to .parametrizations.weight.original1 and .parametrizations.weight.original0.")
-            checkpoint_dict = replace_keys_in_dict(
-                checkpoint_dict, 
-                ".weight_v", 
-                ".parametrizations.weight.original1"
-            )
-            checkpoint_dict = replace_keys_in_dict(
-                checkpoint_dict, 
-                ".weight_g", 
-                ".parametrizations.weight.original0"
-            )
-
-    model_state_dict = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-    new_state_dict = {k: checkpoint_dict["model"].get(k, v) for k, v in model_state_dict.items()}
-
-    if hasattr(model, "module"):
-        model.module.load_state_dict(new_state_dict, strict=False)
-    else:
-        model.load_state_dict(new_state_dict, strict=False)
+    model_state = model.module if hasattr(model, "module") else model
+    model_state.load_state_dict(checkpoint_dict["model"], strict=True)
 
     if optimizer and load_opt == 1:
-        opt_state = checkpoint_dict.get("optimizer", None)
-
-        if opt_state is None:
-            raise ValueError(f"[ERROR] Missing optimizer state in checkpoint: {checkpoint_path}")
-
-        try:
+        opt_state = checkpoint_dict.get("optimizer")
+        if opt_state:
             optimizer.load_state_dict(opt_state)
-        except Exception as e:
-            raise ValueError(f"[ERROR] Failed to load optimizer state from checkpoint: {checkpoint_path}. Reason: {e}")
+            print("Loaded optimizer state.")
 
-        if not hasattr(optimizer, 'state_dict'):
-            raise ValueError(f"ERROR: Optimizer does not have a valid state_dict method after loading. Check the optimizer setup.")
-
-        print(f"Loaded optimizer state from checkpoint successfully.")
-
-    print(f"Loaded checkpoint '{checkpoint_path}' (epoch {checkpoint_dict['iteration']})")
-
+    print(f"Loaded checkpoint '{checkpoint_path}' (iteration {checkpoint_dict['iteration']})")
     return (
         model,
         optimizer,
@@ -120,22 +71,9 @@ def load_checkpoint(architecture, checkpoint_path, model, optimizer=None, load_o
         checkpoint_dict.get("gradscaler", {})
     )
 
+def save_checkpoint(model, optimizer, learning_rate, iteration, checkpoint_path, gradscaler=None):
+    state_dict = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
 
-def save_checkpoint(architecture, model, optimizer, learning_rate, iteration, checkpoint_path, gradscaler=None):
-    """
-    Save the model and optimizer state to a checkpoint file.
-
-    Args:
-        architecture (str): Chosen architecture for training.
-        model (torch.nn.Module): The model to save.
-        optimizer (torch.optim.Optimizer): The optimizer to save the state of.
-        learning_rate (float): The current learning rate.
-        iteration (int): The current iteration.
-        checkpoint_path (str): The path to save the checkpoint to.
-    """
-    state_dict = (
-        model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-    )
     checkpoint_data = {
         "model": state_dict,
         "iteration": iteration,
@@ -143,122 +81,11 @@ def save_checkpoint(architecture, model, optimizer, learning_rate, iteration, ch
         "learning_rate": learning_rate,
     }
 
-    # for fp16 trainings
     if gradscaler is not None:
-            checkpoint_data["gradscaler"] = gradscaler.state_dict()
-
-    # Backwards compatibility for mainline, for "RVC" architecture
-    if architecture == "RVC":
-        checkpoint_data = replace_keys_in_dict(
-            checkpoint_data, ".parametrizations.weight.original1", ".weight_v"
-        )
-        checkpoint_data = replace_keys_in_dict(
-            checkpoint_data, ".parametrizations.weight.original0", ".weight_g"
-        )
-
-    # Save the checkpoint data
-    torch.save(checkpoint_data, checkpoint_path)
-    print(f"Saved model '{checkpoint_path}' (epoch {iteration})")
-
-
-def load_checkpoints(checkpoint_path, *models, optimizer=None, load_opt=1):
-    """
-    Load a checkpoint into multiple models and optionally a shared optimizer.
-
-    Args:
-        checkpoint_path (str): Path to the checkpoint file.
-        *models (torch.nn.Module): List of models to load in the same order they were saved.
-        optimizer (torch.optim.Optimizer, optional): Shared optimizer. Defaults to None.
-        load_opt (int, optional): Whether to load the optimizer state. Defaults to 1.
-
-    Returns:
-        tuple: (models..., optimizer, learning_rate, iteration)
-    """
-    assert os.path.isfile(checkpoint_path), f"Checkpoint file not found: {checkpoint_path}"
-
-    checkpoint_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-
-    # Reverse key name remapping
-    checkpoint_dict = replace_keys_in_dict(
-        replace_keys_in_dict(checkpoint_dict, ".weight_v", ".parametrizations.weight.original1"),
-        ".weight_g", ".parametrizations.weight.original0"
-    )
-
-    model_names = ["mpd", "cqt"]
-    assert len(models) == len(model_names), f"Expected {len(model_names)} models, got {len(models)}"
-
-    for model, name in zip(models, model_names):
-        assert name in checkpoint_dict, f"Missing key '{name}' in checkpoint."
-        model_state_dict = (
-            model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-        )
-        new_state_dict = {
-            k: checkpoint_dict[name].get(k, v) for k, v in model_state_dict.items()
-        }
-        if hasattr(model, "module"):
-            res = model.module.load_state_dict(new_state_dict, strict=False)
-        else:
-            res = model.load_state_dict(new_state_dict, strict=False)
-
-        if debug_save_load:
-            print(f"[DEBUG][{name}] missing_keys: {res.missing_keys}")
-            print(f"[DEBUG][{name}] unexpected_keys: {res.unexpected_keys}")
-
-
-    if optimizer and load_opt == 1:
-        opt_state = checkpoint_dict.get("optimizer", {})
-        optimizer.load_state_dict(opt_state)
-
-        if debug_save_load:
-            check_optimizer_coverage([models[0], models[1]], optimizer)
-
-            print("═══════════════ OPTIMIZER VERIFYING ═══════════════")
-            print(f"[VERIF] Optimizer keys: {list(opt_state.keys())}")
-            print(f"[VERIF] Param groups count: {len(opt_state.get('param_groups', []))}")
-            print(f"[VERIF] State entries count: {len(opt_state.get('state', {}))}")
-            print("═══════════════════════════════════════════════════")
-
-            total_mpd = sum(p.numel() for p in models[0].parameters())
-            total_cqt = sum(p.numel() for p in models[1].parameters())
-            print(f"[VERIF] Param MPD: {total_mpd}, CQT: {total_cqt}")
-            print(f"[VERIF] optim_d.state after  load: {len(optimizer.state)}")
-
-
-    print(f"Loaded checkpoint '{checkpoint_path}' (epoch {checkpoint_dict['iteration']})")
-
-    return (*models, optimizer, checkpoint_dict.get("learning_rate", 0), checkpoint_dict["iteration"])
-
-
-def save_checkpoints(models, optimizer, learning_rate, iteration, checkpoint_path):
-    """
-    Save multiple models and a shared optimizer state to a checkpoint file,
-    after verifying optimizer coverage.
-    """
-    model_names = ["mpd", "cqt"]
-    assert len(models) == len(model_names), "Expected exactly two models: mpd and cqt"
-
-    if debug_save_load:
-        verify_optimizer_has_all_params(models, optimizer, model_names)
-
-    checkpoint_data = {
-        "iteration":      iteration,
-        "optimizer":      optimizer.state_dict(),
-        "learning_rate":  learning_rate,
-    }
-    for model, name in zip(models, model_names):
-        sd = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-        checkpoint_data[name] = sd
-
-    checkpoint_data = replace_keys_in_dict(
-        replace_keys_in_dict(checkpoint_data,
-                             ".parametrizations.weight.original1", ".weight_v"),
-        ".parametrizations.weight.original0", ".weight_g",
-    )
+        checkpoint_data["gradscaler"] = gradscaler.state_dict()
 
     torch.save(checkpoint_data, checkpoint_path)
-    print(f"✅ Saved checkpoint '{checkpoint_path}' (epoch {iteration})")
-
-
+    print(f"Saved model to {checkpoint_path}")
 
 def summarize(
     writer,
@@ -512,74 +339,6 @@ def old_session_cleanup(now_dir, model_name):
     print("    ██████  Cleanup done!")
 
 
-def verify_remap_checkpoint(checkpoint_path, model, architecture):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    checkpoint_state_dict = checkpoint["model"]
-    print(f"[ ] Verifying checkpoint for selected architecture: {architecture}")
-
-    strict_mode = True
-
-    try:
-        if architecture == "RVC":
-            if hasattr(model, "module"):
-                model.module.load_state_dict(checkpoint_state_dict, strict=strict_mode)
-            else:
-                model.load_state_dict(checkpoint_state_dict, strict=strict_mode)
-        elif architecture != "RVC":
-            print("[ ] Non-RVC architecture pretrains detected. Checking for old keys...")
-            
-            # Check for old keys and remap them if found
-            if any(key.endswith(".weight_v") for key in checkpoint_state_dict.keys()) and \
-               any(key.endswith(".weight_g") for key in checkpoint_state_dict.keys()):
-                print("[ ] Old keys detected. Converting .weight_v and .weight_g to new format...")
-                checkpoint_state_dict = replace_keys_in_dict(
-                    checkpoint_state_dict,
-                    ".weight_v",
-                    ".parametrizations.weight.original1"
-                )
-                print("[ ] Remapping `.weight_v` keys completed.")
-                checkpoint_state_dict = replace_keys_in_dict(
-                    checkpoint_state_dict,
-                    ".weight_g",
-                    ".parametrizations.weight.original0"
-                )
-                print("[ ] Remapping `.weight_g` keys completed.")
-            else:
-                print("[ ] No old keys detected. Proceeding without remapping.")
-            
-            # Load the state dictionary after remapping
-            if hasattr(model, "module"):
-                model.module.load_state_dict(checkpoint_state_dict, strict=strict_mode)
-            else:
-                model.load_state_dict(checkpoint_state_dict, strict=strict_mode)
-
-    except RuntimeError as e:
-        error_message = str(e)
-        if "size mismatch for" in error_message:
-            print("\nError: A size mismatch was detected between the checkpoint and the model.")
-            print("This usually means the model's architecture or sample rate is different from the checkpoint's.")
-            print("Please check your model settings.")
-            print("Detailed mismatch report:")
-            for mismatch in error_message.split("\n"):
-                if "size mismatch for" in mismatch:
-                    print(f"  - {mismatch.strip()}")
-        elif "Missing key(s) in state_dict:" in error_message or "Unexpected key(s) in state_dict:" in error_message:
-            print("\nError: Key mismatch detected. The checkpoint's parameters do not match the model's.")
-            print("This may be due to a different architecture or a corrupted checkpoint.")
-            print("Missing or unexpected keys details:")
-            print(error_message)
-        else:
-            print(f"An unknown runtime error occurred when loading the checkpoint.")
-            print(f"Please check your model settings for compatibility with the checkpoint.")
-            print(f"Original PyTorch error: {e}")
-        
-        sys.exit(1)
-    else:
-        del checkpoint
-        del checkpoint_state_dict
-        print("[ ] Checkpoint successfully verified and loaded.")
-
-
 def print_init_setup(
     warmup_duration,
     rank,
@@ -593,8 +352,8 @@ def print_init_setup(
     kl_annealing_cycle_duration,
     spectral_loss,
     adversarial_loss,
-    use_env_loss,
     vits2_mode,
+    use_tstp
 ):
     # Warmup init msg:
     if rank == 0:
@@ -652,12 +411,6 @@ def print_init_setup(
         else:
             print("    ██████  Vits mode: vits-based (Default RVC)")
 
-        # Envelope loss check:
-        if use_env_loss:
-            print("    ██████  Envelope loss: Enabled")
-        else:
-            print("    ██████  Envelope loss: Not Enabled")
-
         # Validation check:
         print(f"    ██████  Using Validation: {use_validation}")
 
@@ -673,6 +426,8 @@ def print_init_setup(
         if use_kl_annealing:
             print(f"    ██████  KL loss annealing enabled with cycle duration of: {kl_annealing_cycle_duration} epochs.")
 
+        if use_tstp:
+            print(f"    ██████  Two-Stage Training Protocol: Enabled")
 
 def train_loader_safety(benchmark_mode, train_loader):
     if not benchmark_mode:
@@ -747,9 +502,9 @@ def early_stopper(
             d_path = os.path.join(experiment_dir, f"D_{global_step}.pth")
 
             # Save Generator checkpoint
-            save_checkpoint(architecture, net_g, optim_g, config.train.learning_rate, epoch, g_path, gradscaler)
+            save_checkpoint(net_g, optim_g, config.train.learning_rate, epoch, g_path, gradscaler)
             # Save Discriminator checkpoint
-            save_checkpoint(architecture, net_d, optim_d, config.train.learning_rate, epoch, d_path, gradscaler)
+            save_checkpoint(net_d, optim_d, config.train.learning_rate, epoch, d_path, gradscaler)
 
             # Save small weight model
             if save_weight_models:
@@ -774,3 +529,134 @@ def early_stopper(
             dist.barrier()
         return True
     return False
+
+
+class WeightTrajectoryVisualizer:
+    def __init__(self, history_limit=50):
+        self.history_limit = history_limit
+        self.downsample_size = 8000
+
+        self.history = {
+            "vocoder": {"weights": [], "epoch": []},
+            "context": {"weights": [], "epoch": []}
+        }
+
+    def update(self, model, epoch):
+        if hasattr(model, 'module'):
+            model_ref = model.module
+        else:
+            model_ref = model
+
+        vocoder_weights = []
+        context_weights = []
+
+        for name, param in model_ref.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            data = param.detach().cpu().flatten()
+            if name.startswith("dec."):
+                vocoder_weights.append(data)
+            else:
+                context_weights.append(data)
+
+        self._process_group("vocoder", vocoder_weights, epoch)
+        self._process_group("context", context_weights, epoch)
+
+    def _process_group(self, key, weights_list, epoch):
+        if not weights_list:
+            return
+
+        flat = torch.cat(weights_list)
+
+        if flat.numel() > self.downsample_size:
+            step = flat.numel() // self.downsample_size
+            flat = flat[::step].clone()
+
+        group = self.history[key]
+        group["weights"].append(flat.numpy())
+        group["epoch"].append(epoch)
+
+        if len(group["weights"]) > self.history_limit:
+            group["weights"].pop(0)
+            group["epoch"].pop(0)
+
+    def get_plot(self):
+        """
+        2-Row Dashboard:
+        Top; Vocoder ( Decoder )
+        Bottom; Context ( Encoders / Flow )
+        """
+        if len(self.history["vocoder"]["weights"]) < 3 and len(self.history["context"]["weights"]) < 3:
+            return None
+
+        fig = plt.figure(figsize=(15, 9), dpi=100)
+        gs = gridspec.GridSpec(
+            2, 3,
+            width_ratios=[2.4, 1.1, 1.1],
+            height_ratios=[1, 1]
+        )
+        fig.patch.set_facecolor('#f2f2f2')
+
+        self._plot_row(fig, gs, 0, "vocoder", "Vocoder")
+        self._plot_row(fig, gs, 1, "context", "Context (Enc/Flow)")
+
+        plt.tight_layout()
+        fig.canvas.draw()
+
+        data_np = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data_np = data_np.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close(fig)
+
+        return data_np
+
+    def _plot_row(self, fig, gs, row_idx, key, title_prefix):
+        group = self.history[key]
+        if len(group["weights"]) < 3:
+            return
+
+        data = np.stack(group["weights"])
+        epochs = group["epoch"]
+
+        mean = np.mean(data, axis=0)
+        centered = data - mean
+        u, s, vh = np.linalg.svd(centered, full_matrices=False)
+        coords = u[:, :2] * s[:2]
+
+        expl_var = (s[:2] ** 2) / np.sum(s ** 2)
+        total_var = np.sum(expl_var) * 100
+
+        velocity = np.linalg.norm(np.diff(data, axis=0), axis=1)
+
+        drift = np.linalg.norm(data - data[0], axis=1)
+
+        ax_traj = fig.add_subplot(gs[row_idx, 0])
+        colors = cm.cividis(np.linspace(0.15, 0.85, len(coords)))
+
+        for i in range(len(coords) - 1):
+            ax_traj.annotate('', xy=coords[i+1], xytext=coords[i], arrowprops=dict(arrowstyle="->", color=colors[i], lw=1.4))
+
+        ax_traj.scatter(coords[:, 0], coords[:, 1], c=colors, s=30)
+        ax_traj.text(coords[0, 0], coords[0, 1], 'Start', fontsize=8, fontweight='bold')
+        ax_traj.text(coords[-1, 0], coords[-1, 1], f'Ep {epochs[-1]}', fontsize=8, fontweight='bold', color='red')
+
+        ax_traj.set_title(f"{title_prefix} Trajectory (Var: {total_var:.1f}%)", fontsize=11, fontweight='bold')
+        ax_traj.grid(True, alpha=0.3)
+        ax_traj.set_xticks([])
+        ax_traj.set_yticks([])
+
+        ax_vel = fig.add_subplot(gs[row_idx, 1])
+        ax_vel.plot(epochs[1:], velocity, color='#2e7d32', lw=1.6)
+        ax_vel.set_title("Update Speed", fontsize=10)
+        ax_vel.grid(True, alpha=0.3)
+        ax_vel.tick_params(axis='x', labelsize=8)
+
+        ax_drift = fig.add_subplot(gs[row_idx, 2])
+        ax_drift.plot(epochs, drift, color='teal', lw=1.5)
+        ax_drift.fill_between(epochs, drift, color='teal', alpha=0.1)
+        ax_drift.set_title("Total Drift", fontsize=10)
+        ax_drift.grid(True, alpha=0.3)
+        ax_drift.tick_params(axis='x', labelsize=8)
+
+        for ax in [ax_traj, ax_vel, ax_drift]:
+            ax.set_facecolor('#f7f7f7')

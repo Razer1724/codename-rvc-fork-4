@@ -115,6 +115,7 @@ class Synthesizer(torch.nn.Module):
                     gin_channels=gin_channels,
                     sr=sr,
                     checkpointing=checkpointing,
+                    use_inplace=True,
                 )
                 print("    ██████  Vocoder: PCPH-GAN")
             else:  # vocoder == "HiFi-GAN"

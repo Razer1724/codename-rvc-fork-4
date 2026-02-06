@@ -7,6 +7,8 @@ from torch import Tensor
 import numpy as np
 
 import torch.nn as nn
+import torch.nn.init as init
+
 from torch.nn import Conv1d, ConvTranspose1d
 from torch.nn.utils import remove_weight_norm
 from torch.nn.utils.parametrizations import weight_norm
@@ -17,25 +19,28 @@ from torch.amp import autocast # guard
 from torch.utils.checkpoint import checkpoint
 
 from rvc.lib.algorithm.generators.pcph_gan_modules.pcph_dirichlet_fused import FusedDirichlet
-from rvc.lib.algorithm.generators.pcph_gan_modules.snake_beta_fused_triton import SnakeBeta as SnakeBetaFused
+from rvc.lib.algorithm.generators.pcph_gan_modules.snake_beta_fused_triton import SnakeBeta as SnakeBetaFused, snake_kaiming_normal_
 from rvc.lib.algorithm.generators.pcph_gan_modules.PchipF0UpsamplerTorch import PchipF0UpsamplerTorch
-
-# DEBUG
-import torchaudio
-import sys
-
-LRELU_SLOPE = 0.1
-
-def init_weights(m, mean=0.0, std=0.01):
-    classname = m.__class__.__name__
-    if classname.find("Conv") != -1:
-        m.weight.data.normal_(mean, std)
 
 def get_padding(kernel_size, dilation=1):
     return int((kernel_size * dilation - dilation) / 2)
 
-def create_conv1d_layer(channels, kernel_size, dilation):
-    return weight_norm(torch.nn.Conv1d(channels, channels, kernel_size, 1, dilation=dilation, padding=get_padding(kernel_size, dilation)))
+def create_resblock_conv1d_layer(channels, kernel_size, dilation):
+    m = torch.nn.Conv1d(
+        channels, channels, kernel_size, 1, dilation=dilation, padding=get_padding(kernel_size, dilation)
+    )
+    # SnakeBeta adapted initialization
+    snake_kaiming_normal_(m.weight, alpha=1.0, beta=1.0, kind='approx')
+    if m.bias is not None:
+        nn.init.constant_(m.bias, 0)
+
+    return weight_norm(m)
+    
+def create_ups_convtranspose1d_layer(in_channels, out_channels, kernel_size, stride):
+    m = torch.nn.ConvTranspose1d(
+        in_channels, out_channels, kernel_size, stride, padding=(kernel_size - stride) // 2
+    )
+    return weight_norm(m)
 
 
 class KaiserSincFilter1d(nn.Module):
@@ -83,7 +88,7 @@ class pu_downsampler(nn.Module):
             out_channels=out_channels,
             kernel_size=3,
             padding=1,
-            bias=True
+            bias=False
         )
 
     def forward(self, x):
@@ -145,9 +150,8 @@ class ResBlock(torch.nn.Module):
             dilations (Tuple[int]): Tuple of dilation rates for each convolution layer.
         """
         layers = torch.nn.ModuleList(
-            [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
+            [create_resblock_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        layers.apply(init_weights)
         return layers
 
     def forward(self, x: torch.Tensor, x_mask: Optional[torch.Tensor] = None):
@@ -271,7 +275,6 @@ class SourceModulePCPH(torch.nn.Module):
         power_factor: float = 0.1,
         add_noise_std: float = 0.003,
         use_pchip: bool = True,
-        stable_init: bool = True,
     ):
         super(SourceModulePCPH, self).__init__()
         self.sample_rate = sample_rate
@@ -280,9 +283,8 @@ class SourceModulePCPH(torch.nn.Module):
         self.power_factor = power_factor
         self.noise_std = add_noise_std
         self.use_pchip = use_pchip
-        self.stable_init = stable_init
 
-        self.l_linear = torch.nn.Linear(1, 1)
+        self.l_linear = torch.nn.Linear(1, 1, bias=False)
         self.l_tanh = torch.nn.Tanh()
 
     def forward(self, f0: torch.Tensor, upsample_factor: int = None):
@@ -346,10 +348,11 @@ class PCPH_GAN_Generator(nn.Module):
         gin_channels, # 256
         sr, # 48000,
         checkpointing: bool = False, # not implemented yet.
+        use_inplace: bool = True,
     ):
         super(PCPH_GAN_Generator, self).__init__()
-        self.leaky_relu_slope = LRELU_SLOPE
         self.checkpointing = checkpointing
+        self.use_inplace = use_inplace
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
         total_ups_factor = math.prod(upsample_rates)
@@ -361,8 +364,7 @@ class PCPH_GAN_Generator(nn.Module):
             random_init_phase=True,
             power_factor=0.1,
             add_noise_std=0.003,
-            use_pchip=True,
-            stable_init=True
+            use_pchip=True
         )
 
         # Initial feats conv, projection: 192 -> 512
@@ -373,7 +375,6 @@ class PCPH_GAN_Generator(nn.Module):
         self.resblocks = nn.ModuleList()
         self.har_convs = nn.ModuleList()
 
-
         ch = upsample_initial_channel # 512
 
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
@@ -381,7 +382,7 @@ class PCPH_GAN_Generator(nn.Module):
             ch //= 2
 
             # Features upsampling convs
-            self.ups.append(weight_norm(ConvTranspose1d(2 * ch, ch, k, u, padding=(k - u) // 2)))
+            self.ups.append(create_ups_convtranspose1d_layer(2 * ch, ch, k, u))
 
             # Resblocks
             for j, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes)):
@@ -394,13 +395,10 @@ class PCPH_GAN_Generator(nn.Module):
                 self.har_convs.append(pu_downsampler(out_channels=ch, downsample_factor=s_c))
             else:
                 # Projecting 1 channel -> ch channels
-                self.har_convs.append(Conv1d(1, ch, kernel_size=1))
+                self.har_convs.append(Conv1d(1, ch, kernel_size=1, bias=False))
 
         # Post convolution
         self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3, bias=False))
-
-        # init weights
-        self.ups.apply(init_weights)
 
         # embedding / spk conditioning layer
         if gin_channels != 0:
@@ -425,14 +423,16 @@ class PCPH_GAN_Generator(nn.Module):
         for i in range(self.num_upsamples):
 
             # pre-upsampling activation
-            x = F.silu(x, inplace=True)
-
+            x = F.silu(x, inplace=self.use_inplace)
             # Upsample features
             x = self.ups[i](x)
 
             # pcph harmonic injection
-            har_prior_injection = self.har_convs[i](har_prior)
-            x = x + har_prior_injection
+            if self.use_inplace:
+                x.add_(self.har_convs[i](har_prior))
+            else:
+                har_prior_injection = self.har_convs[i](har_prior)
+                x = x + har_prior_injection
 
             # Resblocks processing
             xs = None
@@ -443,12 +443,10 @@ class PCPH_GAN_Generator(nn.Module):
                     xs += self.resblocks[i * self.num_kernels + j](x)
             x = xs / self.num_kernels
 
-        # Activation before post conv
-        x = F.silu(x, inplace=True)
-
-        # Post convolution
+        # Final act
+        x = F.silu(x, inplace=self.use_inplace)
+        # Post conv
         x = self.conv_post(x)
-
         # Tanh
         x = torch.tanh(x)
 

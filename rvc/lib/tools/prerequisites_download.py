@@ -1,7 +1,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-import requests
+import requests 
 
 url_base = "https://huggingface.co/IAHispano/Applio/resolve/main/Resources" # Might change in future
 
@@ -16,17 +16,33 @@ pretraineds_hifigan_list = [
             "f0G40k.pth",
             "f0G48k.pth",
         ],
+        "https://huggingface.co/Codename0/codename-rvc-fork-4-assets/resolve/main/pretrained_models/rvc_nsf_hifigan/v2",
     )
-]                                 
+]
+
+smartcutter_list = [
+    (
+        "smartcutter/",
+        [
+            "v3_model_32000.pth",
+            "v3_model_40000.pth",
+            "v3_model_48000.pth",
+        ],
+        "https://huggingface.co/Codename0/SmartCutter/resolve/main",
+    )
+]
+
 models_list = [
     ("predictors/", ["rmvpe.pt"]),
     ("predictors/", ["fcpe_ddsp.pt"], "https://huggingface.co/Codename0/codename-rvc-fork-4-assets/resolve/main/f0_predictors")
 ]
+
 embedders_list = [
     ("embedders/contentvec/", ["pytorch_model.bin", "config.json"]),
     ("embedders/spin_v1", ["pytorch_model.bin", "config.json"], "https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/spin"),
     ("embedders/spin_v2", ["pytorch_model.bin", "config.json"], "https://huggingface.co/dr87/spinv2_rvc/resolve/main"),
 ]
+
 executables_list = [
     ("", ["ffmpeg.exe", "ffprobe.exe"]),
 ]
@@ -38,6 +54,7 @@ folder_mapping_list = {
     "embedders/spin_v2": "rvc/models/embedders/spin_v2/",
     "predictors/": "rvc/models/predictors/",
     "formant/": "rvc/models/formant/",
+    "smartcutter/": "rvc/models/smartcutter/"
 }
 
 
@@ -118,19 +135,25 @@ def download_mapping_files(file_mapping_list, global_bar):
             future.result()
 
 
-
 def split_pretraineds(pretrained_list):
     f0_list = []
     non_f0_list = []
-    for folder, files in pretrained_list:
+    for entry in pretrained_list:
+        if len(entry) == 3:
+            folder, files, url = entry
+        else:
+            folder, files = entry
+            url = None
+
         f0_files = [f for f in files if f.startswith("f0")]
         non_f0_files = [f for f in files if not f.startswith("f0")]
-        if f0_files:
-            f0_list.append((folder, f0_files))
-        if non_f0_files:
-            non_f0_list.append((folder, non_f0_files))
-    return f0_list, non_f0_list
 
+        if f0_files:
+            f0_list.append((folder, f0_files, url) if url else (folder, f0_files))
+        if non_f0_files:
+            non_f0_list.append((folder, non_f0_files, url) if url else (folder, non_f0_files))
+
+    return f0_list, non_f0_list
 
 pretraineds_hifigan_list, _ = split_pretraineds(pretraineds_hifigan_list)
 
@@ -139,16 +162,23 @@ def calculate_total_size(
     pretraineds_hifigan,
     models,
     exe,
+    smartcutter,
 ):
     """
     Calculate the total size of all files to be downloaded based on selected categories.
     """
     total_size = 0
+
     if models:
         total_size += get_file_size_if_missing(models_list)
         total_size += get_file_size_if_missing(embedders_list)
+
     if exe and os.name == "nt":
         total_size += get_file_size_if_missing(executables_list)
+
+    if smartcutter:
+        total_size += get_file_size_if_missing(smartcutter_list)
+
     total_size += get_file_size_if_missing(pretraineds_hifigan)
     return total_size
 
@@ -157,6 +187,7 @@ def prequisites_download_pipeline(
     pretraineds_hifigan,
     models,
     exe,
+    smartcutter,
 ):
     """
     Manage the download pipeline for different categories of files.
@@ -165,6 +196,7 @@ def prequisites_download_pipeline(
         pretraineds_hifigan_list if pretraineds_hifigan else [],
         models,
         exe,
+        smartcutter,
     )
 
     if total_size > 0:
@@ -179,6 +211,8 @@ def prequisites_download_pipeline(
                     download_mapping_files(executables_list, global_bar)
                 else:
                     print("No executables needed")
+            if smartcutter:
+                download_mapping_files(smartcutter_list, global_bar)
             if pretraineds_hifigan:
                 download_mapping_files(pretraineds_hifigan_list, global_bar)
     else:

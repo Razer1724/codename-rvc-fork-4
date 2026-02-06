@@ -7,7 +7,7 @@ from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils import remove_weight_norm
 from torch.utils.checkpoint import checkpoint
 
-from rvc.lib.algorithm.commons import init_weights, get_padding
+from rvc.lib.algorithm.commons import get_padding
 
 
 class ResBlock(nn.Module):
@@ -51,7 +51,6 @@ class ResBlock(nn.Module):
                 for d in dilation
             ]
         )
-        self.convs1.apply(init_weights)
 
         self.convs2 = nn.ModuleList(
             [
@@ -68,7 +67,6 @@ class ResBlock(nn.Module):
                 for d in dilation
             ]
         )
-        self.convs2.apply(init_weights)
 
     def forward(self, x: torch.Tensor):
         for c1, c2 in zip(self.convs1, self.convs2):
@@ -149,7 +147,6 @@ class ParallelResBlock(nn.Module):
             padding=3,
         )
 
-        self.input_conv.apply(init_weights)
 
         self.blocks = nn.ModuleList(
             [
@@ -354,8 +351,6 @@ class RefineGANGenerator(nn.Module):
             )
         )
 
-        self.mel_conv.apply(init_weights)
-
         if gin_channels != 0:
             self.cond = nn.Conv1d(256, channels // 2, 1)
 
@@ -382,7 +377,6 @@ class RefineGANGenerator(nn.Module):
         self.conv_post = weight_norm(
             nn.Conv1d(channels, 1, 7, 1, padding=3, bias=False)
         )
-        self.conv_post.apply(init_weights)
 
     def forward(self, mel: torch.Tensor, f0: torch.Tensor, g: torch.Tensor = None):
         f0_size = mel.shape[-1]

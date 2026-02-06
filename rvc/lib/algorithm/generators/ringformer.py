@@ -19,7 +19,6 @@ import numpy as np
 from rvc.lib.algorithm.residuals import ResBlock, ResBlock_Snake_Fused, ResBlock_SnakeBeta
 from rvc.lib.algorithm.conformer.conformer import Conformer
 
-from rvc.lib.algorithm.commons import init_weights
 from rvc.lib.algorithm.conformer.stft import TorchSTFT
 
 # DEBUG
@@ -259,8 +258,6 @@ class RingFormerGenerator(nn.Module):
                 )
             )
 
-        self.ups.apply(init_weights)
-        self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
 
         self.stft = TorchSTFT(

@@ -6,8 +6,6 @@ from torch.nn.utils import remove_weight_norm
 from torch.nn.utils.parametrizations import weight_norm
 from torch.utils.checkpoint import checkpoint
 import numpy as np
-
-from rvc.lib.algorithm.commons import init_weights
 from rvc.lib.algorithm.residuals import LRELU_SLOPE, ResBlock
 
 
@@ -258,7 +256,6 @@ class HiFiGANNSFGenerator(torch.nn.Module):
         )
 
         self.conv_post = torch.nn.Conv1d(channels[-1], 1, 7, 1, padding=3, bias=False)
-        self.ups.apply(init_weights)
 
         if gin_channels != 0:
             self.cond = torch.nn.Conv1d(gin_channels, upsample_initial_channel, 1)
