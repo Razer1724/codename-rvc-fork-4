@@ -1,3 +1,5 @@
+--- START OF FILE train.py ---
+
 import os
 import signal
 
@@ -684,6 +686,13 @@ def train_tab():
         with gr.Accordion("Advanced Settings for training", open=False):
             with gr.Row():
                 with gr.Column():
+                    use_saved_config_on_resume = gr.Checkbox(
+                        label="Use Saved Config (Ignore UI)",
+                        info="If enabled, training will resume using the settings inside the model's `config.json`, ignoring the sliders and options set in this UI.",
+                        value=False,
+                        interactive=True,
+                        key='use_saved_config_on_resume'
+                    )
                     save_only_latest_net_models = gr.Checkbox(
                         label="Save Only Latest G/D",
                         info="Don't disable it unless you need each 'G' and 'D' model saved every epoch. \n( It has it's use for pretrains creation, but not for finetuning. )",
@@ -982,6 +991,7 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
+                    use_saved_config_on_resume,
                 ],
                 outputs=[train_output_info],
             )
@@ -1201,7 +1211,8 @@ def train_tab():
                 d_pretrained_path, multiple_gpu, training_gpu, use_warmup,
                 warmup_duration, use_custom_lr, custom_lr_g,
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
-                rolling_loss_steps, use_tstp, index_algorithm, use_kl_annealing
+                rolling_loss_steps, use_tstp, index_algorithm, use_kl_annealing,
+                use_saved_config_on_resume
             ])
 
             def save_training_preset(inputs):
