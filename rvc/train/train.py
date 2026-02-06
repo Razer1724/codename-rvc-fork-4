@@ -56,6 +56,7 @@ from utils import (
     latest_checkpoint_path,
     load_wav_to_torch,
     load_config_from_json,
+    save_config_to_json,
     mel_spec_similarity,
     flush_writer,
     block_tensorboard_flush_on_exit,
@@ -88,43 +89,13 @@ from rvc.train.process.extract_model import extract_model
 from rvc.lib.algorithm import commons
 from rvc.train.utils import replace_keys_in_dict
 
-# Parse command line arguments start region ===========================
+# ARGUMENT & CONFIG HANDLING START ==========================================
 
-model_name = sys.argv[1]
-epoch_save_frequency = int(sys.argv[2])
-total_epoch_count = int(sys.argv[3])
-pretrainG = sys.argv[4]
-pretrainD = sys.argv[5]
-gpus = sys.argv[6]
-batch_size = int(sys.argv[7])
-sample_rate = int(sys.argv[8])
-save_only_latest_net_models = strtobool(sys.argv[9])
-save_weight_models = strtobool(sys.argv[10])
-use_warmup = strtobool(sys.argv[11])
-warmup_duration = int(sys.argv[12])
-cleanup = strtobool(sys.argv[13])
-vocoder = sys.argv[14]
-architecture = sys.argv[15]
-optimizer_choice = sys.argv[16]
-adversarial_loss = sys.argv[17]
-use_checkpointing = strtobool(sys.argv[18])
-use_tf32 = bool(strtobool(sys.argv[19]))
-use_benchmark = bool(strtobool(sys.argv[20]))
-use_deterministic = bool(strtobool(sys.argv[21]))
-spectral_loss = sys.argv[22]
-lr_scheduler = sys.argv[23]
-exp_decay_gamma = float(sys.argv[24])
-use_validation = strtobool(sys.argv[25])
-use_kl_annealing = strtobool(sys.argv[26])
-kl_annealing_cycle_duration = int(sys.argv[27])
-vits2_mode = strtobool(sys.argv[28])
-rolling_loss_steps = int(sys.argv[29])
-use_tstp = bool(strtobool(sys.argv[30]))
-use_custom_lr = strtobool(sys.argv[31])
-custom_lr_g, custom_lr_d = (float(sys.argv[32]), float(sys.argv[33])) if use_custom_lr else (None, None)
-assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
-
-# Parse command line arguments end region ===========================
+# 1. Basic Path Setup (Required to load config)
+try:
+    model_name = sys.argv[1]
+except IndexError:
+    sys.exit("Error: model_name argument is missing. Usage: python train.py <model_name> [optional_args...]")
 
 current_dir = os.getcwd()
 experiment_dir = os.path.join(current_dir, "logs", model_name)
@@ -132,11 +103,133 @@ config_save_path = os.path.join(experiment_dir, "config.json")
 dataset_path = os.path.join(experiment_dir, "sliced_audios")
 model_info_path = os.path.join(experiment_dir, "model_info.json")
 
-
-# Load the config from json
+# 2. Load Existing Config
 config = load_config_from_json(config_save_path)
 config.data.training_files = os.path.join(experiment_dir, "filelist.txt")
 
+# 3. Helper Functions for Argument Parsing and Persistence
+changes_log = []
+
+def get_config_val(conf, path, default=None):
+    """Retrieve value from HParams using dot notation path."""
+    keys = path.split('.')
+    curr = conf
+    try:
+        for k in keys:
+            curr = curr[k]
+        return curr
+    except (KeyError, AttributeError):
+        return default
+
+def set_config_val(conf, path, value):
+    """Set value in HParams using dot notation path."""
+    keys = path.split('.')
+    curr = conf
+    for k in keys[:-1]:
+        if k not in curr:
+            curr[k] = HParams()
+        curr = curr[k]
+    curr[keys[-1]] = value
+
+def parse_arg(index, arg_name, converter, config_path, default):
+    """
+    Parses an argument from sys.argv, compares it with config, 
+    logs changes, updates config, and returns the final value.
+    """
+    global changes_log
+    
+    # 1. Get value from Config (Current State)
+    config_val = get_config_val(config, config_path, default)
+    
+    # 2. Get value from CLI (New State)
+    cli_val = None
+    if len(sys.argv) > index:
+        raw_val = sys.argv[index]
+        # Treat empty strings or 'None' as missing args
+        if raw_val not in ["", "None"]:
+            try:
+                cli_val = converter(raw_val)
+            except Exception as e:
+                print(f"Warning: Could not parse argument {arg_name} ('{raw_val}'). Using saved config value.")
+
+    # 3. Determine Final Value
+    # Logic: If CLI provided -> Use CLI. If CLI missing -> Use Config.
+    final_val = cli_val if cli_val is not None else config_val
+    
+    # 4. Detect Change (Only if we had a valid CLI input that differs from Config)
+    if cli_val is not None and cli_val != config_val:
+        changes_log.append(f"  - {arg_name}: {config_val} -> {final_val}")
+        set_config_val(config, config_path, final_val)
+    
+    return final_val
+
+# 4. Parse Arguments with Mapping
+# Format: (sys.argv_index, "Human Name", Converter, "config.json.path", DefaultValue)
+
+epoch_save_frequency = parse_arg(2, "Save Frequency", int, "train.save_every_epoch", 10)
+total_epoch_count    = parse_arg(3, "Total Epochs", int, "train.total_epoch", 1000)
+pretrainG            = parse_arg(4, "Pretrain G", str, "train.pretrainG", "")
+pretrainD            = parse_arg(5, "Pretrain D", str, "train.pretrainD", "")
+gpus                 = parse_arg(6, "GPUS", str, "train.gpu_ids", "0")
+batch_size           = parse_arg(7, "Batch Size", int, "train.batch_size", 8)
+sample_rate          = parse_arg(8, "Sample Rate", int, "data.sample_rate", 40000)
+save_only_latest_net_models = parse_arg(9, "Save Only Latest", lambda x: bool(strtobool(x)), "train.save_only_latest", True)
+save_weight_models   = parse_arg(10, "Save Small Weights", lambda x: bool(strtobool(x)), "train.save_every_weights", True)
+use_warmup           = parse_arg(11, "Use Warmup", lambda x: bool(strtobool(x)), "train.use_warmup", False)
+warmup_duration      = parse_arg(12, "Warmup Duration", int, "train.warmup_epochs", 5)
+cleanup              = parse_arg(13, "Cleanup Old Logs", lambda x: bool(strtobool(x)), "train.cleanup", False)
+vocoder              = parse_arg(14, "Vocoder", str, "model.vocoder_name", "HiFi-GAN")
+architecture         = parse_arg(15, "Architecture", str, "model.architecture", "v2")
+optimizer_choice     = parse_arg(16, "Optimizer", str, "train.optimizer", "AdamW")
+adversarial_loss     = parse_arg(17, "Adv Loss", str, "train.adversarial_loss", "lsgan")
+use_checkpointing    = parse_arg(18, "Checkpointing", lambda x: bool(strtobool(x)), "train.use_checkpointing", False)
+use_tf32             = parse_arg(19, "Use TF32", lambda x: bool(strtobool(x)), "train.use_tf32", False)
+use_benchmark        = parse_arg(20, "Use Benchmark", lambda x: bool(strtobool(x)), "train.use_benchmark", False)
+use_deterministic    = parse_arg(21, "Use Deterministic", lambda x: bool(strtobool(x)), "train.use_deterministic", False)
+spectral_loss        = parse_arg(22, "Spectral Loss", str, "train.spectral_loss", "L1 Mel Loss")
+lr_scheduler         = parse_arg(23, "LR Scheduler", str, "train.lr_scheduler", "exp decay epoch")
+exp_decay_gamma      = parse_arg(24, "Decay Gamma", float, "train.exp_decay_gamma", 0.999875)
+use_validation       = parse_arg(25, "Use Validation", lambda x: bool(strtobool(x)), "train.use_validation", False)
+use_kl_annealing     = parse_arg(26, "KL Annealing", lambda x: bool(strtobool(x)), "train.use_kl_annealing", False)
+kl_annealing_cycle_duration = parse_arg(27, "KL Cycle", int, "train.kl_annealing_cycle_duration", 100)
+vits2_mode           = parse_arg(28, "VITS2 Mode", lambda x: bool(strtobool(x)), "model.vits2_mode", False)
+rolling_loss_steps   = parse_arg(29, "Rolling Loss Steps", int, "train.rolling_loss_steps", 100)
+use_tstp             = parse_arg(30, "Use TSTP", lambda x: bool(strtobool(x)), "train.use_tstp", False)
+use_custom_lr        = parse_arg(31, "Use Custom LR", lambda x: bool(strtobool(x)), "train.use_custom_lr", False)
+
+# For custom LRs, we handle slightly differently to allow None/0 logic
+config_lr_g = get_config_val(config, "train.custom_lr_g", None)
+config_lr_d = get_config_val(config, "train.custom_lr_d", None)
+cli_lr_g = float(sys.argv[32]) if len(sys.argv) > 32 and sys.argv[32] not in ["", "None"] else None
+cli_lr_d = float(sys.argv[33]) if len(sys.argv) > 33 and sys.argv[33] not in ["", "None"] else None
+
+custom_lr_g = cli_lr_g if cli_lr_g is not None else config_lr_g
+custom_lr_d = cli_lr_d if cli_lr_d is not None else config_lr_d
+
+if use_custom_lr:
+    if cli_lr_g is not None and cli_lr_g != config_lr_g:
+        changes_log.append(f"  - Custom LR G: {config_lr_g} -> {custom_lr_g}")
+        set_config_val(config, "train.custom_lr_g", custom_lr_g)
+    if cli_lr_d is not None and cli_lr_d != config_lr_d:
+        changes_log.append(f"  - Custom LR D: {config_lr_d} -> {custom_lr_d}")
+        set_config_val(config, "train.custom_lr_d", custom_lr_d)
+    assert (custom_lr_g and custom_lr_d), "Invalid custom LR values. Both G and D must be set."
+else:
+    # Ensure they are saved even if unused, for consistency
+    set_config_val(config, "train.custom_lr_g", custom_lr_g if custom_lr_g else 0.0)
+    set_config_val(config, "train.custom_lr_d", custom_lr_d if custom_lr_d else 0.0)
+
+# 5. Save Updated Config and Notify User
+if changes_log:
+    print(f"\n[CONFIG] Training settings updated based on arguments:")
+    for log in changes_log:
+        print(log)
+    save_config_to_json(config, config_save_path)
+    print(f"[CONFIG] Configuration saved to: {config_save_path}\n")
+else:
+    print(f"\n[CONFIG] No argument changes detected. Resuming with saved settings from {config_save_path}.\n")
+
+# ARGUMENT & CONFIG HANDLING END ============================================
 
 # AMP precision / dtype init
 if config.train.bf16_run:
