@@ -215,6 +215,13 @@ class HParams:
     def __repr__(self):
         return repr(self.__dict__)
 
+    def to_dict(self):
+        def convert(obj):
+            if isinstance(obj, HParams):
+                return {k: convert(v) for k, v in obj.items()}
+            return obj
+        return convert(self)
+
 
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
@@ -234,6 +241,13 @@ def load_config_from_json(config_save_path):
         )
         sys.exit(1)
 
+def save_config_to_json(config, config_save_path):
+    try:
+        data = config.to_dict() if isinstance(config, HParams) else config
+        with open(config_save_path, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving config to {config_save_path}: {e}")
 
 def mel_spec_similarity(y_hat_mel, y_mel):
     device = y_hat_mel.device
