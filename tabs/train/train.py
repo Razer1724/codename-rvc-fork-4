@@ -1,5 +1,3 @@
---- START OF FILE train.py ---
-
 import os
 import signal
 
