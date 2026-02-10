@@ -809,6 +809,13 @@ def train_tab():
                         interactive=True,
                         key='use_tstp'
                     )
+                    use_saved_settings = gr.Checkbox(
+                        label="Use Saved Settings (Override UI)",
+                        info="If enabled, training will ignore the sliders above and load the settings used in the previous run from the model's config.json. Useful for resuming training without re-entering data.",
+                        value=False,
+                        interactive=True,
+                        key='use_saved_settings'
+                    )
             with gr.Column():
                 custom_pretrained = gr.Checkbox(
                     label="Custom Pretrained",
@@ -982,6 +989,7 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
+                    use_saved_settings,
                 ],
                 outputs=[train_output_info],
             )
