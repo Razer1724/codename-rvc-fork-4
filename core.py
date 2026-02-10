@@ -545,9 +545,50 @@ def run_train_script(
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
+    use_saved_settings: bool = False,
     
 ):
     global training_process
+
+    if use_saved_settings:
+        config_path = os.path.join(logs_path, model_name, "config.json")
+        if os.path.exists(config_path):
+            print(f"Loading training settings from: {config_path}")
+            with open(config_path, 'r') as f:
+                saved_conf = json.load(f).get('train', {})
+
+            # Map config keys to local variables
+            epoch_save_frequency = saved_conf.get('epoch_save_frequency', epoch_save_frequency)
+            total_epoch_count = saved_conf.get('total_epoch_count', total_epoch_count)
+            batch_size = saved_conf.get('batch_size', batch_size)
+            save_only_latest_net_models = saved_conf.get('save_only_latest_net_models', save_only_latest_net_models)
+            save_weight_models = saved_conf.get('save_weight_models', save_weight_models)
+            use_warmup = saved_conf.get('use_warmup', use_warmup)
+            warmup_duration = saved_conf.get('warmup_duration', warmup_duration)
+            vocoder = saved_conf.get('vocoder', vocoder)
+            architecture = saved_conf.get('architecture', architecture)
+            optimizer = saved_conf.get('optimizer', optimizer)
+            adversarial_loss = saved_conf.get('adversarial_loss', adversarial_loss)
+            use_checkpointing = saved_conf.get('use_checkpointing', use_checkpointing)
+            use_tf32 = saved_conf.get('use_tf32', use_tf32)
+            use_benchmark = saved_conf.get('use_benchmark', use_benchmark)
+            use_deterministic = saved_conf.get('use_deterministic', use_deterministic)
+            spectral_loss = saved_conf.get('spectral_loss', spectral_loss)
+            lr_scheduler = saved_conf.get('lr_scheduler', lr_scheduler)
+            exp_decay_gamma = str(saved_conf.get('exp_decay_gamma', exp_decay_gamma))
+            use_validation = saved_conf.get('use_validation', use_validation)
+            use_kl_annealing = saved_conf.get('use_kl_annealing', use_kl_annealing)
+            kl_annealing_cycle_duration = saved_conf.get('kl_annealing_cycle_duration', kl_annealing_cycle_duration)
+            vits2_mode = saved_conf.get('vits2_mode', vits2_mode)
+            rolling_loss_steps = saved_conf.get('rolling_loss_steps', rolling_loss_steps)
+            use_tstp = saved_conf.get('use_tstp', use_tstp)
+            use_custom_lr = saved_conf.get('use_custom_lr', use_custom_lr)
+            custom_lr_g = saved_conf.get('custom_lr_g', custom_lr_g)
+            custom_lr_d = saved_conf.get('custom_lr_d', custom_lr_d)
+
+            print(f"██████  RESUMING WITH SAVED SETTINGS ██████ ")
+        else:
+             print(f"Config file not found at {config_path}. Using UI settings.")
 
     if pretrained == True:
         from rvc.lib.tools.pretrained_selector import pretrained_selector
