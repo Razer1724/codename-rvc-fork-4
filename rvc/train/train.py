@@ -137,6 +137,47 @@ model_info_path = os.path.join(experiment_dir, "model_info.json")
 config = load_config_from_json(config_save_path)
 config.data.training_files = os.path.join(experiment_dir, "filelist.txt")
 
+try:
+    with open(config_save_path, "r", encoding="utf-8") as f:
+        json_config = json.load(f)
+except Exception:
+    json_config = {"train": {}}
+
+json_config["train"].update({
+    "epoch_save_frequency": epoch_save_frequency,
+    "total_epoch_count": total_epoch_count,
+    "batch_size": batch_size,
+    "save_only_latest_net_models": save_only_latest_net_models,
+    "save_weight_models": save_weight_models,
+    "use_warmup": use_warmup,
+    "warmup_duration": warmup_duration,
+    "vocoder": vocoder,
+    "architecture": architecture,
+    "optimizer": optimizer_choice,
+    "adversarial_loss": adversarial_loss,
+    "use_checkpointing": use_checkpointing,
+    "use_tf32": use_tf32,
+    "use_benchmark": use_benchmark,
+    "use_deterministic": use_deterministic,
+    "spectral_loss": spectral_loss,
+    "lr_scheduler": lr_scheduler,
+    "exp_decay_gamma": exp_decay_gamma,
+    "use_validation": use_validation,
+    "use_kl_annealing": use_kl_annealing,
+    "kl_annealing_cycle_duration": kl_annealing_cycle_duration,
+    "vits2_mode": vits2_mode,
+    "rolling_loss_steps": rolling_loss_steps,
+    "use_tstp": use_tstp,
+    "use_custom_lr": use_custom_lr,
+})
+
+if use_custom_lr:
+    json_config["train"]["custom_lr_g"] = custom_lr_g
+    json_config["train"]["custom_lr_d"] = custom_lr_d
+
+# Save back to file
+with open(config_save_path, "w", encoding="utf-8") as f:
+    json.dump(json_config, f, indent=4)
 
 # AMP precision / dtype init
 if config.train.bf16_run:
