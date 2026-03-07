@@ -511,7 +511,7 @@ def train_tab():
                     maximum=1,
                     label="Noise Reduction Strength",
                     info="Set the desired level for clean-up level. Higher values result in more aggressive cleaning, but can negatively impact the audio.",
-                    visible=False,
+                    visible="hidden",
                     value=0.5,
                     interactive=True,
                     key='clean_strength'
@@ -744,7 +744,7 @@ def train_tab():
                         info="Duration of the initial clipping value. \n Measured in steps.",
                         value=0,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='grad_clip_steps_duration'
                     )
                     grad_clip_value_g_cap = gr.Number(
@@ -752,7 +752,7 @@ def train_tab():
                         info="Value to be set for G during the scheduled duration.",
                         value=0,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='grad_clip_value_g_cap'
                     )
                     grad_clip_value_d_cap = gr.Number(
@@ -760,7 +760,7 @@ def train_tab():
                         info="Value to be set for D during the scheduled duration.",
                         value=0,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='grad_clip_value_d_cap'
                     )
                     grad_clip_value_g_release = gr.Number(
@@ -768,7 +768,7 @@ def train_tab():
                         info="Value to be set for G after scheduled duration",
                         value=0,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='grad_clip_value_g_release'
                     )
                     grad_clip_value_d_release = gr.Number(
@@ -776,7 +776,7 @@ def train_tab():
                         info="Value to be set for D after scheduled duration",
                         value=0,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='grad_clip_value_d_release'
                     )
                 with gr.Column(scale=0.9):
@@ -820,7 +820,7 @@ def train_tab():
                         label="KL annealing cycle duration",
                         info=KL_ANNEALING_CYCLE_INFO,
                         interactive=True,
-                        visible=False,
+                        visible="hidden",
                         key='kl_annealing_cycle_duration'
                     )
                     use_tstp = gr.Checkbox(
@@ -1082,20 +1082,20 @@ def train_tab():
                     )
 
             def toggle_visible(checkbox):
-                return {"visible": checkbox, "__type__": "update"}
+                return {"visible": checkbox or "hidden", "__type__": "update"}
 
             def toggle_visible_grad_clip(field):
-                return [{"visible": field, "__type__": "update"} for _ in range(5)]
+                return [{"visible": field or "hidden", "__type__": "update"} for _ in range(5)]
 
             def toggle_visible_gamma(lr_scheduler):
                 if lr_scheduler in ["exp decay step", "exp decay epoch"]:
                     return {"visible": True, "__type__": "update"}
-                return {"visible": False, "__type__": "update"}
+                return {"visible": "hidden", "__type__": "update"}
 
             def toggle_pretrained(pretrained, custom_pretrained):
                 if custom_pretrained == False:
                     return {"visible": pretrained, "__type__": "update"}, {
-                        "visible": False,
+                        "visible": "hidden",
                         "__type__": "update",
                     }
                 else:
@@ -1120,7 +1120,7 @@ def train_tab():
             def toggle_visible_embedder_custom(embedder_model):
                 if embedder_model == "custom":
                     return {"visible": True, "__type__": "update"}
-                return {"visible": False, "__type__": "update"}
+                return {"visible": "hidden", "__type__": "update"}
 
             def toggle_architecture(architecture, vocoder_arch):
                 if architecture == "Fork/Applio":
@@ -1205,7 +1205,7 @@ def train_tab():
                     return gr.skip()
 
             def update_noise_reduce_slider_visibility(noise_reduction):
-                return gr.update(visible=noise_reduction)
+                return gr.update(visible=noise_reduction or "hidden")
 
             saved_components.extend([
                 # Model settings

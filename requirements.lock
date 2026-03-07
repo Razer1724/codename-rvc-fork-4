@@ -225,6 +225,7 @@ numpy==2.2.6
     #   resampy
     #   scikit-learn
     #   scipy
+    #   soundfile
     #   sox
     #   soxr
     #   stftpitchshift
@@ -358,7 +359,7 @@ six==1.17.0
     # via
     #   flatten-dict
     #   python-dateutil
-soundfile==0.12.1
+soundfile==0.13.1
     # via
     #   -r requirements.txt
     #   librosa
