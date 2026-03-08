@@ -2,6 +2,9 @@
 !assets/audios/.gitkeep
 !assets/datasets/.gitkeep
 !assets/audios/audio-others/.gitkeep
+!assets/f0editor_userdata/base_f0/.gitkeep
+!assets/f0editor_userdata/f0_presets/.gitkeep
+!assets/f0editor_userdata/session/.gitkeep
 !logs/.gitkeep
 !logs/mute/
 !logs/mute_spin_v1/
@@ -18,6 +21,9 @@ utmos/
 ffprobe.exe
 ffmpeg.exe
 assets/audios/
+assets/f0editor_userdata/base_f0/
+assets/f0editor_userdata/f0_presets/
+assets/f0editor_userdata/session/
 assets/datasets/
 assets/audios/audio-others/
 logs/

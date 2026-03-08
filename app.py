@@ -2,6 +2,25 @@ import gradio as gr
 import sys
 import os
 import logging
+import asyncio
+
+# Suppress noisy Windows ProactorEventLoop connection-reset errors.
+# These fire whenever a browser tab closes/resets an SSE or long-poll
+# connection mid-flight (which Gradio does constantly). Completely harmless.
+#
+# set_exception_handler only catches coroutine/future exceptions — this error
+# comes from a plain *callback*, so we have to patch the offending method directly.
+try:
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+    _original_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+    def _patched_call_connection_lost(self, exc):
+        try:
+            _original_call_connection_lost(self, exc)
+        except ConnectionResetError:
+            pass
+    _ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
+except Exception:
+    pass  # Non-Windows or future Python version where this doesn't exist ( hopefully )
 
 # Constants
 DEFAULT_PORT = 7897

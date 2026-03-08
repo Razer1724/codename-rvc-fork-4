@@ -17,6 +17,17 @@ from core import (
 from rvc.lib.utils import format_title
 from tabs.settings.sections.restart import stop_infer
 
+from tabs.inference.f0_editor_component import (
+    extract_f0_for_editor,
+    save_edited_f0_to_temp,
+    build_f0_editor_html,
+    build_f0_editor_js,
+    cleanup_old_temp_f0,
+    list_f0_presets,
+    save_f0_preset,
+    load_f0_preset,
+)
+
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 
@@ -423,6 +434,186 @@ def inference_tab():
                 outputs=[model_file, index_file],
             )
 
+        def _audio_stem(audio_path: str) -> str:
+            """Return a stable identifier for an audio path (stem, no extension)."""
+            if not audio_path:
+                return ""
+            return os.path.splitext(os.path.basename(audio_path))[0]
+
+        def trigger_f0_extraction(audio_path, f0_method_val, cache: dict):
+            """
+            Called when the user clicks ' Edit F0 / Pitch Curve'.
+
+            Returns:
+                f0_data_for_editor  (str)        – JSON for the JS canvas editor
+                f0_edit_status      (str)        – human-readable status line
+                f0_editor_panel     gr.update    – make panel visible
+                f0_editor_cache     dict         – updated state
+            """
+            if not audio_path:
+                return (
+                    "",
+                    "⚠️  No audio selected. Please choose an audio file first.",
+                    gr.update(visible=False),
+                    cache,
+                )
+
+            stem = _audio_stem(audio_path)
+
+            # Return cached extraction if available and audio hasn't changed
+            if cache.get("audio_name") == stem and cache.get("f0_json"):
+                return (
+                    cache["f0_json"],
+                    f"♻️  Loaded cached F0 for '{stem}'. Edit away!",
+                    gr.update(visible=True),
+                    cache,
+                )
+
+            # Extract
+            gr.Info(f"Extracting F0 using {f0_method_val} – this may take a moment…")
+            json_data = extract_f0_for_editor(audio_path, f0_method_val)
+
+            if json_data is None:
+                return (
+                    "",
+                    "❌  F0 extraction failed. Check the console for details.",
+                    gr.update(visible=False),
+                    cache,
+                )
+
+            new_cache = {"audio_name": stem, "f0_json": json_data}
+            cleanup_old_temp_f0()
+
+            return (
+                json_data,
+                f"✅  F0 extracted for '{stem}'. You can now edit the curve below.",
+                gr.update(visible=True),
+                new_cache,
+            )
+
+        def on_audio_change(audio_path, cache: dict):
+            """
+            Fired whenever the audio dropdown or upload changes.
+            If the new audio differs from the cached one, clear editor state.
+            """
+            stem = _audio_stem(audio_path)
+            if cache.get("audio_name") and cache["audio_name"] != stem:
+                # Different song -> wipe editor
+                return (
+                    "", # f0_data_for_editor cleared
+                    "", # edited_f0_output cleared
+                    gr.update(visible=False), # hide editor panel
+                    {}, # clear cache state
+                    output_path_fn(audio_path), # keep output_path logic unchanged
+                )
+            # Same song or no cache -> just update the output path
+            return (
+                cache.get("f0_json", ""),
+                "",
+                gr.update(visible=bool(cache.get("f0_json"))),
+                cache,
+                output_path_fn(audio_path),
+            )
+
+        def enforce_terms_with_f0_editor(
+            terms_accepted,
+            edited_f0_json: str,
+            audio_path: str,
+            cache: dict,
+            pitch, filter_radius, index_rate, rms_mix_rate, protect,
+            f0_method, audio, output_path, model_file, index_file,
+            split_audio, autotune, autotune_strength,
+            clean_audio, clean_strength, export_format,
+            embedder_model, embedder_model_custom,
+            formant_shifting, formant_qfrency, formant_timbre,
+            post_process, reverb, pitch_shift, limiter, gain,
+            distortion, chorus, bitcrush, clipping, compressor, delay,
+            reverb_room_size, reverb_damping, reverb_wet_gain, reverb_dry_gain,
+            reverb_width, reverb_freeze_mode,
+            pitch_shift_semitones, limiter_threshold, limiter_release_time,
+            gain_db, distortion_gain,
+            chorus_rate, chorus_depth, chorus_center_delay, chorus_feedback, chorus_mix,
+            bitcrush_bit_depth, clipping_threshold,
+            compressor_threshold, compressor_ratio, compressor_attack, compressor_release,
+            delay_seconds, delay_feedback, delay_mix,
+            sid, seed, uvmp_submodel,
+        ):
+            if not terms_accepted:
+                message = "You must agree to the Terms of Use to proceed."
+                gr.Info(message)
+                return message, None
+
+            # Build f0_file from the editor if the user has edited the curve
+            f0_file = None
+            stem = _audio_stem(audio_path)
+            if (edited_f0_json
+                    and edited_f0_json.strip() not in ("", "null")
+                    and cache.get("audio_name") == stem):
+                temp = save_edited_f0_to_temp(edited_f0_json)
+                if temp is not None:
+                    f0_file = temp
+                    gr.Info("Using your edited F0 curve for conversion.")
+
+            return run_infer_script(
+                pitch, filter_radius, index_rate, rms_mix_rate, protect,
+                f0_method, audio, output_path, model_file, index_file,
+                split_audio, autotune, autotune_strength,
+                clean_audio, clean_strength, export_format,
+                f0_file,
+                embedder_model, embedder_model_custom,
+                formant_shifting, formant_qfrency, formant_timbre,
+                post_process, reverb, pitch_shift, limiter, gain,
+                distortion, chorus, bitcrush, clipping, compressor, delay,
+                reverb_room_size, reverb_damping, reverb_wet_gain, reverb_dry_gain,
+                reverb_width, reverb_freeze_mode,
+                pitch_shift_semitones, limiter_threshold, limiter_release_time,
+                gain_db, distortion_gain,
+                chorus_rate, chorus_depth, chorus_center_delay, chorus_feedback, chorus_mix,
+                bitcrush_bit_depth, clipping_threshold,
+                compressor_threshold, compressor_ratio, compressor_attack, compressor_release,
+                delay_seconds, delay_feedback, delay_mix,
+                sid, seed, uvmp_submodel,
+            )
+
+        def handle_preset_cmd(cmd_json: str) -> str:
+            """
+            Called whenever JS writes a command to the preset_cmd_box.
+            Commands: {"action":"list"} | {"action":"save","name":str,"freqs":[...]}
+                    | {"action":"load","name":str}
+            Returns a result JSON string for JS to consume.
+            _t is echoed back so the result textarea always gets a unique value,
+            ensuring the MutationObserver fires even when the payload is identical.
+            """
+            if not cmd_json or not cmd_json.strip():
+                return ""
+            try:
+                cmd = json.loads(cmd_json)
+            except Exception:
+                return json.dumps({"ok": False, "error": "bad JSON"})
+
+            action = cmd.get("action", "")
+            _t = cmd.get("_t", 0) # echo timestamp back so result is always unique
+
+            if action == "list":
+                return json.dumps({"action": "list", "ok": True, "names": list_f0_presets(), "_t": _t})
+
+            elif action == "save":
+                name = cmd.get("name", "").strip()
+                freqs_json = json.dumps(cmd.get("freqs", []))
+                result = json.loads(save_f0_preset(name, freqs_json))
+                result["action"] = "save"
+                result["_t"] = _t
+                return json.dumps(result)
+
+            elif action == "load":
+                name = cmd.get("name", "").strip()
+                result = json.loads(load_f0_preset(name))
+                result["action"] = "load"
+                result["_t"] = _t
+                return json.dumps(result)
+
+            return json.dumps({"ok": False, "error": f"unknown action: {action}", "_t": _t})
+
         def on_model_change(model_path):
             """
             Handles UI changes for .pth and .uvmp voice model selection.
@@ -465,6 +656,10 @@ def inference_tab():
             if model_path and model_path.endswith(".uvmp"):
                 return gr.update(value=repurposed_index_value)
             return gr.update()
+
+    # Holds: { "audio_name": "<stem of the audio filename>",
+    # "f0_json": "<JSON string from extract_f0_for_editor>" }
+    f0_editor_cache = gr.State({})
 
     # Single inference tab
     with gr.Tab("Single input infer"):
@@ -1050,10 +1245,55 @@ def inference_tab():
                             )
                         move_files_button = gr.Button("Move files to custom embedder folder")
 
-                f0_file = gr.File(
-                    label="The f0 curve represents the variations in the base frequency of a voice over time, showing how pitch rises and falls.",
-                    visible=True,
-                )
+                with gr.Column():
+                    # F0 editor trigger
+                    with gr.Row():
+                        f0_edit_btn = gr.Button(
+                            "✏️  Edit F0 / Pitch Curve",
+                            variant="secondary",
+                            size="sm",
+                        )
+                        f0_edit_status = gr.Textbox(
+                            value="",
+                            label="",
+                            placeholder="Click the button to extract and open the curve editor.",
+                            interactive=False,
+                            show_label=False,
+                            max_lines=1,
+                        )
+
+                    # Hidden data-exchange textboxes (JS reads/writes these)
+                    f0_data_for_editor = gr.Textbox(
+                        value="",
+                        visible="hidden",
+                        elem_id="f0_data_for_editor",
+                        label="F0 Raw Data",
+                    )
+                    edited_f0_output = gr.Textbox(
+                        value="",
+                        visible="hidden",
+                        elem_id="edited_f0_output",
+                        label="Edited F0 JSON",
+                    )
+                    # Preset communication channel: JS writes cmd JSON here
+                    preset_cmd_box = gr.Textbox(
+                        value="",
+                        visible="hidden",
+                        elem_id="f0ed_preset_cmd",
+                        label="Preset Command",
+                    )
+                    # Python writes result JSON here; JS MutationObserver picks it up
+                    preset_result_box = gr.Textbox(
+                        value="",
+                        visible="hidden",
+                        elem_id="f0ed_preset_result",
+                        label="Preset Result",
+                    )
+
+                    # The canvas editor panel ( hidden until extraction completes )
+                    with gr.Column(visible=False) as f0_editor_panel:
+                        gr.HTML(value=build_f0_editor_html(), js_on_load=build_f0_editor_js(), elem_id="f0_editor_html")
+
 
         def enforce_terms(terms_accepted, *args):
             if not terms_accepted:
@@ -1968,10 +2208,27 @@ def inference_tab():
         inputs=[model_file],
         outputs=[model_file, index_file, audio, sid, sid_batch],
     )
+
+    f0_edit_btn.click(
+        fn=trigger_f0_extraction,
+        inputs=[audio, f0_method, f0_editor_cache],
+        outputs=[
+          f0_data_for_editor,   # sends JSON to JS
+          f0_edit_status,
+          f0_editor_panel,
+          f0_editor_cache,
+        ],
+    )
+    preset_cmd_box.change(
+        fn=handle_preset_cmd,
+        inputs=[preset_cmd_box],
+        outputs=[preset_result_box],
+    )
+
     audio.change(
-        fn=output_path_fn,
-        inputs=[audio],
-        outputs=[output_path],
+        fn=on_audio_change,
+        inputs=[audio, f0_editor_cache],
+        outputs=[f0_data_for_editor, edited_f0_output, f0_editor_panel, f0_editor_cache, output_path],
     )
     upload_audio.upload(
         fn=save_to_wav2,
@@ -2028,9 +2285,12 @@ def inference_tab():
         outputs=[embedder_model_custom_batch],
     )
     convert_button1.click(
-        fn=enforce_terms,
+        fn=enforce_terms_with_f0_editor,
         inputs=[
             terms_checkbox,
+            edited_f0_output,
+            audio,
+            f0_editor_cache,
             pitch,
             filter_radius,
             index_rate,
@@ -2047,7 +2307,6 @@ def inference_tab():
             clean_audio,
             clean_strength,
             export_format,
-            f0_file,
             embedder_model,
             embedder_model_custom,
             formant_shifting,
