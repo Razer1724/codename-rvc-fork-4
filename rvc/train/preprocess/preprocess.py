@@ -13,7 +13,6 @@ import multiprocessing
 import shutil
 import soundfile as sf
 import io
-import soxr
 from fractions import Fraction
 
 now_directory = os.getcwd()
@@ -188,7 +187,8 @@ class PreProcess:
         chunk_len: float,
         overlap_len: float,
         loading_resampling: str,
-        dataset_format: str
+        dataset_format: str,
+        normalization_mode: str = "none",
     ):
         audio_length = 0
         try:
@@ -248,7 +248,8 @@ def _process_audio_worker(args):
         chunk_len,
         overlap_len,
         loading_resampling,
-        dataset_format
+        dataset_format,
+        normalization_mode,
     ) = args
     pp = PreProcess(sr, exp_dir)
     return pp.process_audio(
@@ -262,39 +263,63 @@ def _process_audio_worker(args):
         chunk_len,
         overlap_len,
         loading_resampling,
-        dataset_format
+        dataset_format,
+        normalization_mode,
     )
 
-def _process_and_save_worker(args):
-    file_name, gt_wavs_dir, wavs16k_dir = args
-    try:
-        # Process ground truth audio
-        gt_path = os.path.join(gt_wavs_dir, file_name)
-        gt_audio, gt_sr = sf.read(gt_path)
+def _apply_post_norm(audio: np.ndarray, sr: int, mode: str) -> np.ndarray:
+    """
+    Dispatch to the correct norm function.
+    All three operate on float32/float64 arrays and return float32.
+    """
+    if mode == "post_rms":
+        # RMS normalization - Consistent loudness targeting -18 dBFS RMS
+        eps = 1e-9
+        target_rms = 10 ** (-18.0 / 20)
+        headroom = 10 ** (-0.5  / 20)
+        silence_thresh = 10 ** (-40.0 / 20)
+        mask = np.abs(audio) > silence_thresh
+        if np.any(mask):
+            rms = np.sqrt(np.mean(audio[mask] ** 2) + eps)
+            gain = target_rms / rms
+        else:
+            gain = 1.0
+        audio2 = audio * gain
+        peak = np.abs(audio2).max()
+        if peak > headroom:
+            audio2 = audio2 / peak * headroom
+        return audio2.astype(np.float32)
 
+    elif mode == "post_peak_rvc":
+        # Classic RVC normalization - soft peak blend (MAX_AMPLITUDE * ALPHA)
+        a_max = np.abs(audio).max()
+        if a_max <= 0:
+            return audio.astype(np.float32)
+        return ((audio / a_max * (MAX_AMPLITUDE * ALPHA)) + (1 - ALPHA) * audio).astype(np.float32)
+
+    elif mode == "post_peak":
         # Simple peak normalization to 0.95
-        peak_amp = np.max(np.abs(gt_audio))
-        if peak_amp > 0:
-            gt_normalized = (gt_audio / peak_amp) * 0.95
-        else:
-            gt_normalized = gt_audio
+        peak = np.max(np.abs(audio))
+        if peak > 0:
+            return (audio / peak * 0.95).astype(np.float32)
+        return audio.astype(np.float32)
 
-        save_audio(gt_wavs_dir, file_name.split(".")[0], gt_sr, file_name.split(".")[1], gt_normalized)
+    return audio.astype(np.float32)
 
-        # Process 16k audio
-        k16_path = os.path.join(wavs16k_dir, file_name)
-        k16_audio, k16_sr = sf.read(k16_path)
 
-        # Peak norm to 0.95
-        peak_amp_16k = np.max(np.abs(k16_audio))
-        if peak_amp_16k > 0:
-            k16_normalized = (k16_audio / peak_amp_16k) * 0.95
-        else:
-            k16_normalized = k16_audio
+def _process_and_save_worker(args):
+    """Shared post-norm worker"""
+    file_name, gt_wavs_dir, wavs16k_dir, mode = args
+    try:
+        stem, ext = file_name.split(".")[0], file_name.split(".")[1]
 
-        save_audio(wavs16k_dir, file_name.split(".")[0], k16_sr, file_name.split(".")[1], k16_normalized)
+        gt_audio, gt_sr = sf.read(os.path.join(gt_wavs_dir, file_name))
+        save_audio(gt_wavs_dir, stem, gt_sr, ext, _apply_post_norm(gt_audio, gt_sr, mode))
+
+        k16_audio, k16_sr = sf.read(os.path.join(wavs16k_dir, file_name))
+        save_audio(wavs16k_dir, stem, k16_sr, ext, _apply_post_norm(k16_audio, k16_sr, mode))
     except Exception as e:
-        logger.error(f"Error classic normalizing {file_name}: {e}")
+        logger.error(f"Error normalizing {file_name} ({mode}): {e}")
         raise e
 
 def format_duration(seconds):
@@ -394,7 +419,7 @@ def preprocess_training_set(
     dataset_format: str
 ):
     start_time = time.time()
-
+    print(f"Normalization mode: {normalization_mode}")
     sc_engine = None
     if use_smart_cutter:
         try:
@@ -495,7 +520,8 @@ def preprocess_training_set(
                     chunk_len,
                     overlap_len,
                     loading_resampling,
-                    dataset_format
+                    dataset_format,
+                    normalization_mode,
                 )
                 for idx, f_path in enumerate(current_batch_paths)
             ]
@@ -516,18 +542,26 @@ def preprocess_training_set(
 
     save_dataset_duration(os.path.join(exp_dir, "model_info.json"), total_audio_length)
 
-    if normalization_mode == "post_peak":
-        logger.info("Classic Peak Normalization enabled. Initiating...")
+    POST_NORM_MODES = {
+        "post_rms":      "RMS Normalization",
+        "post_peak_rvc": "Peak Normalization (RVC)",
+        "post_peak":     "Peak Normalization",
+    }
+
+    if normalization_mode in POST_NORM_MODES:
+        logger.info(f"Post Normalization: {POST_NORM_MODES[normalization_mode]}. Initiating...")
         gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
         wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
 
-        audio_files = [f for f in os.listdir(gt_wavs_dir) if f.endswith((".wav", ".flac"))]
-        audio_files.sort()
-
-        arg_list = [(file_name, gt_wavs_dir, wavs16k_dir) for file_name in audio_files]
+        audio_files = sorted(f for f in os.listdir(gt_wavs_dir) if f.endswith((".wav", ".flac")))
+        arg_list = [(f, gt_wavs_dir, wavs16k_dir, normalization_mode) for f in audio_files]
 
         with multiprocessing.Pool(processes=num_processes) as pool:
-             list(tqdm(pool.imap_unordered(_process_and_save_worker, arg_list), total=len(audio_files), desc="Peak Normalization"))
+            list(tqdm(
+                pool.imap_unordered(_process_and_save_worker, arg_list),
+                total=len(audio_files),
+                desc=POST_NORM_MODES[normalization_mode]
+            ))
 
     elapsed_time = time.time() - start_time
     logger.info(f"Preprocessing completed in {elapsed_time:.2f} seconds "

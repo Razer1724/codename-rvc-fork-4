@@ -302,6 +302,7 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
         self.buckets, self.num_samples_per_bucket = self._create_buckets()
         self.total_size = sum(self.num_samples_per_bucket)
         self.num_samples = self.total_size // self.num_replicas
+        self.start_index = 0
 
     def _create_buckets(self):
         """
@@ -373,10 +374,14 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
         if self.shuffle:
             batch_ids = torch.randperm(len(batches), generator=g).tolist()
             batches = [batches[i] for i in batch_ids]
+
         self.batches = batches
 
         assert len(self.batches) * self.batch_size == self.num_samples
-        return iter(self.batches)
+        start = self.start_index
+        self.start_index = 0
+
+        return iter(self.batches[start:])
 
     def _bisect(self, x, lo=0, hi=None):
         """

@@ -1,44 +1,3 @@
-"""
-F0 Curve Editor Component
-=========================
-Provides:
-  - extract_f0_for_editor()   – runs the chosen f0 method on an audio file,
-                                returns a JSON string for the canvas editor.
-                                Results are cached in assets/f0editor_userdata/base_f0/
-                                keyed by audio content hash + method, so the
-                                same song is never re-extracted twice even if
-                                its filename changes.
-  - save_edited_f0_to_temp()  – converts editor JSON back to a CSV temp-file
-                                in assets/f0editor_userdata/session/ (purged on
-                                startup). Wrapped in F0TempFile so pipeline.py's
-                                `hasattr(f0_file,"name")` check passes.
-  - list_f0_presets()         – returns sorted list of saved preset names.
-  - save_f0_preset(name, freqs_json) – save a freq array as a named preset CSV.
-  - load_f0_preset(name)      – load a preset and return its freq list as JSON.
-  - build_f0_editor_html()    – returns the full self-contained HTML/CSS/JS
-                                string to drop into a gr.HTML component.
-  - cleanup_old_temp_f0()     – prunes base_f0 cache files older than 24 h.
-
-Directory layout
-----------------
-assets/f0editor_userdata/
-  base_f0/   persistent per-song CSV caches (hash+method keyed). Never auto-deleted
-             except by cleanup_old_temp_f0(). Stores times+freqs only;
-             spectrogram is recomputed from audio on each load.
-  session/   temporary edit CSVs for the pipeline. Wiped on every process start.
-  f0_presets/ user-saved curve presets. One CSV per preset (raw freq values,
-             one per line). Resampled to current song length on import.
-
-New in this version
--------------------
-* Preset system  – Export current curve as a named preset; Import stretches
-  any saved preset to match the current song length.
-* Spectrogram overlay  – 🎨 Spec toggle button, opacity slider.
-* Rectangular selection – select tool draws a real freq×time rect.
-* Y-axis zoom          – Alt+scroll.
-* Tool shortcuts       – keys 1–8, hover-scoped to the editor panel.
-"""
-
 import os
 import sys
 import json
@@ -63,9 +22,9 @@ F0_MAX       = 1100
 
 # ── Directory layout ──────────────────────────────────────────────────────────
 # assets/f0editor_userdata/
-#   base_f0/   — persistent per-song CSV caches (hash + method keyed).
-#   session/   — temporary edit CSVs for the pipeline (purged on startup).
-#   f0_presets/— user-saved curve presets (one CSV of raw freqs per preset).
+#   base_f0/   - persistent per-song CSV caches (hash + method keyed).
+#   session/   - temporary edit CSVs for the pipeline (purged on startup).
+#   f0_presets/- user-saved curve presets (one CSV of raw freqs per preset).
 # ─────────────────────────────────────────────────────────────────────────────
 F0EDITOR_DIR    = os.path.join(now_dir, "assets", "f0editor_userdata")
 F0_BASE_DIR     = os.path.join(F0EDITOR_DIR, "base_f0")
@@ -78,7 +37,7 @@ _HASH_CHUNK = 1 * 1024 * 1024  # 1 MB
 
 
 def _audio_hash(audio_path: str) -> str:
-    """SHA-256 of the first 1 MB of the file — fast, name-insensitive."""
+    """SHA-256 of the first 1 MB of the file - fast, name-insensitive."""
     h = hashlib.sha256()
     with open(audio_path, "rb") as fh:
         h.update(fh.read(_HASH_CHUNK))
@@ -94,8 +53,22 @@ def _base_cache_path(audio_path: str, f0_method: str) -> str:
 def _purge_session_dir() -> None:
     """Delete all session CSV files. Called once at import time."""
     if os.path.isdir(F0_SESSION_DIR):
-        shutil.rmtree(F0_SESSION_DIR, ignore_errors=True)
-    os.makedirs(F0_SESSION_DIR, exist_ok=True)
+        for fname in os.listdir(F0_SESSION_DIR):
+            if fname == ".gitkeep":
+                continue
+
+            fpath = os.path.join(F0_SESSION_DIR, fname)
+            try:
+                if os.path.isfile(fpath) or os.path.islink(fpath):
+                    os.remove(fpath)
+                elif os.path.isdir(fpath):
+                    shutil.rmtree(fpath)
+            except Exception:
+                pass
+    else:
+        # Create session dir
+        os.makedirs(F0_SESSION_DIR, exist_ok=True)
+
     # Ensure the other persistent dirs exist
     os.makedirs(F0_BASE_DIR, exist_ok=True)
     os.makedirs(F0_PRESETS_DIR, exist_ok=True)
@@ -180,7 +153,7 @@ def extract_f0_for_editor(audio_path: str, f0_method: str = "rmvpe") -> str | No
         }
 
     The PNG is W=spec_cols wide, H=spec_n_bins tall.
-    Row 0 = Nyquist (high freq), last row = DC (0 Hz)  — matches canvas Y.
+    Row 0 = Nyquist (high freq), last row = DC (0 Hz)  - matches canvas Y.
     Column k corresponds to f0 frame  k * spec_frame_step.
 
     Returns None on failure.
@@ -221,7 +194,7 @@ def extract_f0_for_editor(audio_path: str, f0_method: str = "rmvpe") -> str | No
         cfg    = Config()
         device = cfg.device
 
-        # ── load & normalise (always needed — for spec even on cache hit) ──────
+        # ── load & normalise (always needed - for spec even on cache hit) ──────
         audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
         peak     = np.abs(audio).max() / 0.95
         if peak > 1:
@@ -278,7 +251,7 @@ def extract_f0_for_editor(audio_path: str, f0_method: str = "rmvpe") -> str | No
             "duration":     round(len(times) * TIME_STEP_MS / 1000.0, 4),
         }
 
-        # ── spectrogram — always computed fresh from audio ────────────────────
+        # ── spectrogram - always computed fresh from audio ────────────────────
         # The base cache stores only f0 data, so spec is regenerated each time.
         # It's cheap (plain STFT) compared to the neural f0 extractor.
         try:
@@ -359,14 +332,14 @@ def save_edited_f0_to_temp(json_string: str) -> F0TempFile | None:
 # House-keeping
 # ──────────────────────────────────────────────────────────────────────────────
 def cleanup_old_temp_f0(max_age_hours: int = 24) -> None:
-    """
-    Legacy name kept so inference.py import doesn't break.
-    Prunes old files from base_f0/ cache only (session/ is wiped on startup).
-    """
     if not os.path.isdir(F0_BASE_DIR):
         return
+
     cutoff = time.time() - max_age_hours * 3600
     for fname in os.listdir(F0_BASE_DIR):
+        if fname == ".gitkeep":
+            continue
+            
         fpath = os.path.join(F0_BASE_DIR, fname)
         try:
             if os.path.getmtime(fpath) < cutoff:
@@ -582,7 +555,7 @@ def build_f0_editor_html() -> str:
   display:flex; align-items:center; justify-content:center;
 }
 .f0ed-slider-wrap button:hover { background:#33336a; color:#fff; }
-/* Select tool buttons — smaller than toolbar, with group separators */
+/* Select tool buttons - smaller than toolbar, with group separators */
 #f0ed-sub-select button {
   background: #252548; border: 1px solid #3a3a6e; color: #b0b0e0;
   padding: 3px 8px; border-radius: 4px; font-size: 11px;
@@ -699,7 +672,7 @@ def build_f0_editor_html() -> str:
 
   <!-- ── Persistent second row ─────────────────────────────────────────── -->
   <div id="f0ed-toolbar2">
-    <button id="f0ed-enforce" title="When active: Line and Envelope will only write onto already-voiced (non-silent) frames — drawing over silent gaps is blocked">⊢ Enforce Pitch Boundaries</button>
+    <button id="f0ed-enforce" title="When active: Line and Envelope will only write onto already-voiced (non-silent) frames - drawing over silent gaps is blocked">⊢ Enforce Pitch Boundaries</button>
   </div>
 
   <!-- ── Tool-specific sub-toolbar ─────────────────────────────────────── -->
@@ -715,6 +688,9 @@ def build_f0_editor_html() -> str:
       <span id="f0ed-vdepth-val">25</span>
     </span>
     <span id="f0ed-sub-select" style="display:none; align-items:center; gap:2px;">
+      <button id="f0ed-sel-mode-col"  class="active" title="Column selection: full-height vertical band — default [T]">⬛ Col</button>
+      <button id="f0ed-sel-mode-rect" title="Rectangle selection: time × frequency box [R]">▬ Rect</button>
+      <span class="sel-sep"></span>
       <button id="f0ed-sel-up-semi">+1 semi</button>
       <button id="f0ed-sel-down-semi">−1 semi</button>
       <span class="sel-sep"></span>
@@ -756,7 +732,7 @@ def build_f0_editor_html() -> str:
   <div id="f0ed-presetbar">
     <label>Saved:</label>
     <select id="f0ed-preset-select" title="Select a saved preset">
-      <option value="">— no presets saved —</option>
+      <option value="">- no presets saved -</option>
     </select>
     <button id="f0ed-preset-load" title="Apply selected preset to the current curve (resampled to song length)">▶ Load</button>
     <div id="f0ed-preset-sep"></div>
@@ -771,14 +747,14 @@ def build_f0_editor_html() -> str:
   <!-- ── Info modal ─────────────────────────────────────────────────────── -->
   <div id="f0ed-modal">
     <div id="f0ed-modal-box">
-      <h3>F0 Curve Editor — Controls Reference</h3>
+      <h3>F0 Curve Editor - Controls Reference</h3>
 
       <h4>Drawing Tools  <small style="color:#666">(or press 1–8)</small></h4>
       <table>
         <tr><td>✏️ Pen &nbsp;<kbd>1</kbd></td><td>Freehand draw pitch directly onto the canvas. Interpolates between samples so fast strokes leave no gaps.</td></tr>
-        <tr><td>〰️ Smooth Pen &nbsp;<kbd>2</kbd></td><td>Freehand draw with exponential smoothing — adjust the lag with the Smoothing slider in the sub-toolbar.</td></tr>
+        <tr><td>〰️ Smooth Pen &nbsp;<kbd>2</kbd></td><td>Freehand draw with exponential smoothing - adjust the lag with the Smoothing slider in the sub-toolbar.</td></tr>
         <tr><td>⟋ Line &nbsp;<kbd>3</kbd></td><td>Drag to draw a straight interpolated line between two points. Respects <em>Enforce Pitch Boundaries</em>.</td></tr>
-        <tr><td>◇ Envelope &nbsp;<kbd>4</kbd></td><td>Double-click on the pitch curve to place square control nodes — the curve immediately snaps to the interpolated shape. Drag nodes to reshape in real-time. Nodes persist when you switch tools. Use Ctrl+Z to undo the last node; ✕ Clear Envelopes removes all nodes and restores the curve. The Smooth slider morphs the interpolation from sharp linear corners (0) to a fully curved Catmull-Rom spline (100).</td></tr>
+        <tr><td>◇ Envelope &nbsp;<kbd>4</kbd></td><td>Double-click on the pitch curve to place square control nodes - the curve immediately snaps to the interpolated shape. Drag nodes to reshape in real-time. Nodes persist when you switch tools. Use Ctrl+Z to undo the last node; ✕ Clear Envelopes removes all nodes and restores the curve. The Smooth slider morphs the interpolation from sharp linear corners (0) to a fully curved Catmull-Rom spline (100).</td></tr>
         <tr><td>⬚ Select &nbsp;<kbd>5</kbd></td><td>Drag to draw a rectangular selection (time × frequency). Only frames whose pitch falls inside the box are transposed or previewed. Use the sub-toolbar buttons to shift by semitones / octaves.</td></tr>
         <tr><td>≈ Smooth Brush &nbsp;<kbd>6</kbd></td><td>Paint over any region to smooth it locally with a Gaussian kernel. Adjust the brush radius in the sub-toolbar.</td></tr>
         <tr><td>〜 Vibrato &nbsp;<kbd>7</kbd></td><td>Paint rightward over a region to add vibrato. Adjust rate (Hz) and depth (cents) in the sub-toolbar. Each stroke starts at phase 0 so separate strokes never interfere.</td></tr>
@@ -807,6 +783,13 @@ def build_f0_editor_html() -> str:
       <h4>Keyboard Shortcuts</h4>
       <table>
         <tr><td>1 – 8</td><td>Switch tool (only fires when cursor is over the editor): 1 Pen · 2 Smooth Pen · 3 Line · 4 Envelope · 5 Select · 6 Smooth Brush · 7 Vibrato · 8 Eraser</td></tr>
+        <tr><td>R (Select tool)</td><td>Switch to Rectangle selection mode (time × frequency box)</td></tr>
+        <tr><td>T (Select tool)</td><td>Switch to Column selection mode (full-height vertical band — default)</td></tr>
+        <tr><td>Shift+drag (Select)</td><td>Add a new selection without clearing existing ones — build up multiple independent regions. Works even when starting inside an existing selection.</td></tr>
+        <tr><td>Drag inside selection</td><td>Move that selection freely in time without affecting others</td></tr>
+        <tr><td>Shift+↑ / Shift+↓</td><td>Transpose all selections up/down by 1 semitone</td></tr>
+        <tr><td>Ctrl+↑ / Ctrl+↓</td><td>Transpose all selections up/down by 1 octave</td></tr>
+        <tr><td>Shift+draw (Pen / Smooth Pen)</td><td>Snap drawn pitch to the nearest semitone while held; release to return to freehand</td></tr>
         <tr><td>Ctrl+Z</td><td>Undo (also removes the last placed envelope node one at a time)</td></tr>
         <tr><td>Ctrl+Y / Ctrl+Shift+Z</td><td>Redo</td></tr>
       </table>
@@ -834,7 +817,7 @@ def build_f0_editor_js() -> str:
 // ════════════════════════════════════════════════════════════════════════════
 //  Constants
 // ════════════════════════════════════════════════════════════════════════════
-const F0_MAX    = 1200;   // Hz ceiling used throughout the editor
+const F0_MAX    = 2400;   // Hz ceiling used throughout the editor
 const TOOL_KEYS = ['pen','smoothpen','line','envelope','select','smooth','vibrato','eraser'];
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -939,12 +922,34 @@ class F0Editor {
     this.smoothPts   = [];
     this.selStart    = null;
     this.selEnd      = null;
-    this.selFreqLo   = null;   // Hz — bottom of rectangular selection
-    this.selFreqHi   = null;   // Hz — top of rectangular selection
+    this.selFreqLo   = null;   // Hz - bottom of active selection (null = full range in column mode)
+    this.selFreqHi   = null;   // Hz - top of active selection (null = full range in column mode)
     this.lineStart      = null;
     this.smoothHead     = null;
 
-    // Envelope nodes — persistent across tool switches
+    // Selection mode: 'column' (full-height vertical band, like RX) or 'rect' (time×freq box)
+    this.selMode = 'column';
+
+    // Additional selections accumulated with Shift (each: {start, end, freqLo, freqHi})
+    this.extraSelections = [];
+
+    // Selection drag state
+    this.selIsDragging    = false;
+    this.selDragMoved     = false; // true once the mouse actually moves during a drag
+    this.selDragWhich     = null;  // 0 = main sel, 1+ = extraSelections[i-1]
+    this.selDragStartSamp = null;  // cursor sample at drag-start
+    this.selDragInitMain  = null;  // snapshot {start,end,freqLo,freqHi} at drag-start
+    this.selDragInitExtra = [];    // snapshots of extraSelections at drag-start
+
+    // Locked frame indices for keyboard transpose.
+    // Built lazily on first transposeSelection() call, cleared whenever the
+    // selection geometry changes so the next transpose re-captures fresh frames.
+    this.selLockedFrames = null;
+
+    // Shift key state (tracked globally for pen-snap)
+    this.shiftDown = false;
+
+    // Envelope nodes - persistent across tool switches
     // Each node: { s, f, segStart, segEnd }
     this.envelopeNodes  = [];
     this.envDragging    = null;   // index of node currently being dragged
@@ -972,8 +977,21 @@ class F0Editor {
 
     // Gradio sync debounce timer
     this._syncTimer  = null;
-    // Track whether the cursor is over the editor — used to scope 1-8 shortcuts
+    // Track whether the cursor is over the editor - used to scope 1-8 shortcuts
     this.isHovered   = false;
+
+    // ── Render dirty flags ───────────────────────────────────────────────────
+    // Three independent canvas layers.  Only re-paint a layer when its content
+    // has actually changed.  The rAF handle prevents more than one composite
+    // paint per browser frame even if multiple state changes happen synchronously.
+    this._bgDirty      = true;   // grid + spectrogram (changes on zoom/pan/Y-range)
+    this._curveDirty   = true;   // f0 curve data (changes when frames are written)
+    this._overlayDirty = true;   // selection / line preview / envelope nodes
+    this._rafHandle    = null;   // requestAnimationFrame id
+
+    // Gradient cache: rebuilt only when canvas height changes
+    this._curveGrad    = null;
+    this._curveGradH   = -1;
 
     this._bindUI();
     this._bindCanvas();
@@ -991,6 +1009,7 @@ class F0Editor {
       this.viewEnd    = this.currentF0.length;
       this.history    = [];
       this.histIdx    = -1;
+      this._timesCache = null;   // invalidate cached times for new audio
       this._pushHistory();
       this._autoFitY();
 
@@ -1019,18 +1038,24 @@ class F0Editor {
   }
 
   toJSON() {
-    const n  = this.currentF0.length;
-    const ts = this.timeStepMs / 1000;
-    const times = [], freqs = [];
-    for (let i = 0; i < n; i++) {
-      times.push(parseFloat((i * ts).toFixed(6)));
-      freqs.push(this.currentF0[i]);
+    const n   = this.currentF0.length;
+    const ts  = this.timeStepMs / 1000;
+    // Rebuild the times cache if the frame count changed (new audio loaded)
+    if (!this._timesCache || this._timesCache.length !== n) {
+      this._timesCache = new Float64Array(n);
+      for (let i = 0; i < n; i++) this._timesCache[i] = i * ts;
     }
-    return JSON.stringify({ times, freqs, time_step_ms: this.timeStepMs, duration: n * ts });
+    // Spread typed arrays into plain arrays for JSON — faster than push loop
+    return JSON.stringify({
+      times:        Array.from(this._timesCache),
+      freqs:        Array.from(this.currentF0),
+      time_step_ms: this.timeStepMs,
+      duration:     n * ts,
+    });
   }
 
   // ── History ──────────────────────────────────────────────────────────────
-  // Each entry: { f0, nodes, preEnv } — full snapshot of all mutable state
+  // Each entry: { f0, nodes, preEnv } - full snapshot of all mutable state
   _pushHistory() {
     this.history = this.history.slice(0, this.histIdx + 1);
     this.history.push({
@@ -1063,12 +1088,17 @@ class F0Editor {
     this.currentF0     = Float32Array.from(this.originalF0);
     this.selStart      = this.selEnd = null;
     this.selFreqLo     = this.selFreqHi = null;
+    this.extraSelections = [];
+    this._invalidateLock();
     // Wipe envelope state so the reset is truly clean
     this.envelopeNodes = [];
     this.envDragging   = null;
     this.envDragBase   = null;
     this.preEnvelopeF0 = null;
-    this._pushHistory();
+    // Clear the full undo/redo history and seed a single clean entry
+    this.history  = [];
+    this.histIdx  = -1;
+    this._pushHistory();   // now history has exactly one entry: the original curve
     this._renderAll();
   }
 
@@ -1108,7 +1138,7 @@ class F0Editor {
     if (lo === Infinity) return;
     const pad = Math.max((hi - lo) * 0.25, 50);
     this.yMin = Math.max(20,   lo - pad);
-    this.yMax = Math.min(1200, hi + pad);
+    this.yMax = Math.min(2400, hi + pad);
   }
 
   // ── Y-axis helpers ───────────────────────────────────────────────────────
@@ -1116,16 +1146,16 @@ class F0Editor {
     const range = this.yMax - this.yMin;
     this.yMin = Math.max(20,   this.yMin + deltaHz);
     this.yMax = this.yMin + range;
-    if (this.yMax > 8000) { this.yMax = 8000; this.yMin = Math.max(20, this.yMax - range); }
+    if (this.yMax > F0_MAX) { this.yMax = F0_MAX; this.yMin = Math.max(20, this.yMax - range); }
     this._renderAll();
   }
   _zoomY(factor, pivotHz) {
     const range = this.yMax - this.yMin;
     if (pivotHz === undefined) pivotHz = (this.yMin + this.yMax) / 2;
-    const newRange = clamp(range * factor, 30, 7980);
+    const newRange = clamp(range * factor, 30, F0_MAX - 20);
     const ratio = (pivotHz - this.yMin) / range;
     this.yMin = Math.max(20,   pivotHz - ratio * newRange);
-    this.yMax = Math.min(8000, this.yMin + newRange);
+    this.yMax = Math.min(F0_MAX, this.yMin + newRange);
     this._renderAll();
   }
 
@@ -1139,12 +1169,33 @@ class F0Editor {
     });
   }
 
-  _renderAll() {
-    this._resizeCanvas();
-    this._drawGrid();
-    this._drawCurve();
-    this._drawOverlay();
+  // ── Render scheduling ────────────────────────────────────────────────────
+  // Mark individual layers dirty then schedule a single rAF flush.
+  // Multiple calls within one JS task collapse into one repaint per frame.
+
+  _markBg()      { this._bgDirty      = true; this._scheduleRender(); }
+  _markCurve()   { this._curveDirty   = true; this._scheduleRender(); }
+  _markOverlay() { this._overlayDirty = true; this._scheduleRender(); }
+  _markAll()     { this._bgDirty = this._curveDirty = this._overlayDirty = true;
+                   this._scheduleRender(); }
+
+  _scheduleRender() {
+    if (this._rafHandle !== null) return;   // already queued
+    this._rafHandle = requestAnimationFrame(() => {
+      this._rafHandle = null;
+      this._flush();
+    });
   }
+
+  _flush() {
+    this._resizeCanvas();
+    if (this._bgDirty)      { this._drawGrid();    this._bgDirty    = false; }
+    if (this._curveDirty)   { this._drawCurve();   this._curveDirty = false; }
+    if (this._overlayDirty) { this._drawOverlay(); this._overlayDirty = false; }
+  }
+
+  // Legacy entry-point kept for clarity — marks everything dirty.
+  _renderAll() { this._markAll(); }
 
   // ── Spectrogram ──────────────────────────────────────────────────────────
   _drawSpec() {
@@ -1232,8 +1283,78 @@ class F0Editor {
 
     const f0 = this.currentF0;
     const vS = this.viewStart, vE = this.viewEnd;
+    // Pixels per sample — used to decide decimation strategy
+    const pxPerSamp = W / (vE - vS);
 
-    // Unvoiced dashed baseline
+    // ── Pixel-level decimation helper ────────────────────────────────────────
+    // When zoomed far out many consecutive frames land on the same canvas pixel.
+    // We compute min and max freq within each pixel column and draw two points
+    // per pixel, preserving the visible envelope while skipping redundant work.
+    // When zoomed in (≥1 px/sample) we draw every frame as normal.
+    const buildDecimated = (arr) => {
+      // Returns [{x, y}] point list with moveTo hints encoded as y=null
+      if (pxPerSamp >= 1) {
+        // Zoomed in: one point per frame, no decimation needed
+        const pts = [];
+        for (let i = vS; i < vE; i++) {
+          if (arr[i] <= 0) { pts.push(null); continue; }
+          pts.push({ x: this._sampleToX(i), y: this._freqToY(arr[i]) });
+        }
+        return pts;
+      }
+      // Zoomed out: bucket frames into pixel columns
+      const pts     = [];
+      let   lastPx  = -1;
+      let   bucketMin = Infinity, bucketMax = -Infinity;
+      let   bucketMinY = 0, bucketMaxY = 0;
+      let   prevVoiced = false;
+
+      const flush = (px) => {
+        if (bucketMin === Infinity) return;
+        if (!prevVoiced) pts.push(null);
+        // Draw min then max within the bucket to capture full amplitude range
+        if (bucketMinY <= bucketMaxY) {
+          pts.push({ x: px, y: bucketMinY });
+          if (bucketMinY !== bucketMaxY) pts.push({ x: px, y: bucketMaxY });
+        } else {
+          pts.push({ x: px, y: bucketMaxY });
+          if (bucketMinY !== bucketMaxY) pts.push({ x: px, y: bucketMinY });
+        }
+        prevVoiced = true;
+        bucketMin = Infinity; bucketMax = -Infinity;
+      };
+
+      for (let i = vS; i < vE; i++) {
+        if (arr[i] <= 0) {
+          flush(lastPx);
+          prevVoiced = false;
+          continue;
+        }
+        const px = Math.round(this._sampleToX(i));
+        if (px !== lastPx) {
+          flush(lastPx);
+          lastPx = px;
+        }
+        const hz = arr[i];
+        const py = this._freqToY(hz);
+        if (hz < bucketMin) { bucketMin = hz; bucketMinY = py; }
+        if (hz > bucketMax) { bucketMax = hz; bucketMaxY = py; }
+      }
+      flush(lastPx);
+      return pts;
+    };
+
+    // Draw a point list, treating null as a segment break (moveTo)
+    const drawPts = (pts) => {
+      let inSeg = false;
+      for (const p of pts) {
+        if (p === null) { inSeg = false; continue; }
+        if (!inSeg) { ctx.moveTo(p.x, p.y); inSeg = true; }
+        else          ctx.lineTo(p.x, p.y);
+      }
+    };
+
+    // Unvoiced dashed baseline — skip per-pixel decimation (cheap enough)
     ctx.strokeStyle = '#3a3a5e';
     ctx.lineWidth   = 1;
     ctx.setLineDash([3, 5]);
@@ -1247,9 +1368,8 @@ class F0Editor {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Ghost original F0 curve (drawn first, underneath the edited curve)
+    // Ghost original F0 curve
     if (this.ghostVisible && this.originalF0 && this.originalF0.length) {
-      const orig = this.originalF0;
       ctx.save();
       ctx.globalAlpha = this.ghostOpacity;
       ctx.strokeStyle = '#33cc66';
@@ -1258,48 +1378,39 @@ class F0Editor {
       ctx.shadowBlur  = 4;
       ctx.setLineDash([]);
       ctx.beginPath();
-      let ghostSeg = false;
-      for (let i = vS; i < vE; i++) {
-        if (orig[i] <= 0) { ghostSeg = false; continue; }
-        const x = this._sampleToX(i);
-        const y = this._freqToY(orig[i]);
-        if (!ghostSeg) { ctx.moveTo(x, y); ghostSeg = true; }
-        else             ctx.lineTo(x, y);
-      }
+      drawPts(buildDecimated(this.originalF0));
       ctx.stroke();
       ctx.restore();
     }
 
-    // Voiced curve
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0,   '#aa88ff');
-    grad.addColorStop(0.5, '#7766ee');
-    grad.addColorStop(1,   '#4444bb');
-    ctx.strokeStyle = grad;
+    // Voiced curve — cache the gradient, only rebuild when height changes
+    if (!this._curveGrad || this._curveGradH !== H) {
+      this._curveGrad  = ctx.createLinearGradient(0, 0, 0, H);
+      this._curveGrad.addColorStop(0,   '#aa88ff');
+      this._curveGrad.addColorStop(0.5, '#7766ee');
+      this._curveGrad.addColorStop(1,   '#4444bb');
+      this._curveGradH = H;
+    }
+    ctx.strokeStyle = this._curveGrad;
     ctx.lineWidth   = 2.5;
     ctx.shadowColor = '#6644cc';
     ctx.shadowBlur  = 6;
     ctx.beginPath();
-    let inSeg = false;
-    for (let i = vS; i < vE; i++) {
-      if (f0[i] <= 0) { inSeg = false; continue; }
-      const x = this._sampleToX(i);
-      const y = this._freqToY(f0[i]);
-      if (!inSeg) { ctx.moveTo(x, y); inSeg = true; }
-      else          ctx.lineTo(x, y);
-    }
+    drawPts(buildDecimated(f0));
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Voiced/unvoiced boundary dots
-    ctx.fillStyle = '#cc99ff';
-    for (let i = vS + 1; i < vE - 1; i++) {
-      const wasV = f0[i-1] > 0, isV = f0[i] > 0;
-      if (wasV !== isV) {
-        const si = isV ? i : i - 1;
-        if (f0[si] > 0) {
-          const x = this._sampleToX(si), y = this._freqToY(f0[si]);
-          ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    // Voiced/unvoiced boundary dots — only visible when zoomed in enough
+    if (pxPerSamp >= 0.5) {
+      ctx.fillStyle = '#cc99ff';
+      for (let i = vS + 1; i < vE - 1; i++) {
+        const wasV = f0[i-1] > 0, isV = f0[i] > 0;
+        if (wasV !== isV) {
+          const si = isV ? i : i - 1;
+          if (f0[si] > 0) {
+            const x = this._sampleToX(si), y = this._freqToY(f0[si]);
+            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+          }
         }
       }
     }
@@ -1310,18 +1421,9 @@ class F0Editor {
     const W   = this.ovCanvas.width, H = this.ovCanvas.height;
     ctx.clearRect(0, 0, W, H);
 
-    // Selection highlight — rectangular, respects both time and freq bounds
-    if (this.activeTool === 'select' && this.selStart !== null && this.selEnd !== null
-        && this.selFreqLo !== null && this.selFreqHi !== null) {
-      const x1 = this._sampleToX(Math.min(this.selStart, this.selEnd));
-      const x2 = this._sampleToX(Math.max(this.selStart, this.selEnd));
-      const y1 = this._freqToY(this.selFreqHi);   // high freq = low Y
-      const y2 = this._freqToY(this.selFreqLo);   // low  freq = high Y
-      ctx.fillStyle   = 'rgba(120,120,255,0.18)';
-      ctx.strokeStyle = 'rgba(180,180,255,0.6)';
-      ctx.lineWidth   = 1;
-      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    // Selection highlight – draw all selections merged into unified geometry
+    if (this.activeTool === 'select') {
+      this._drawMergedSelections(ctx, H);
     }
 
     // Line-tool drag preview
@@ -1338,7 +1440,7 @@ class F0Editor {
       ctx.setLineDash([]);
     }
 
-    // Envelope nodes — always drawn regardless of active tool
+    // Envelope nodes - always drawn regardless of active tool
     this._drawEnvelopeNodes(ctx, W, H);
   }
 
@@ -1467,14 +1569,14 @@ class F0Editor {
   // Apply all envelope nodes onto currentF0.
   // ALWAYS starts from preEnvelopeF0 so repeated calls are idempotent.
   // The smooth slider controls Catmull-Rom tension (0=linear, fully curved at max).
-  // The curve always passes exactly through every node — no blending needed.
+  // The curve always passes exactly through every node - no blending needed.
   //
   // Restore strategy: we restore the FULL voiced segment (segStart..segEnd),
   // not just the current node span [lo..hi].  This prevents a "dirty window"
   // bug where dragging a node leftward and then back right leaves ghost spline
   // values in the frames the node swept through but no longer covers.
   // Frames outside any segment (e.g. a transposition on a different region)
-  // are still never touched — segStart/segEnd are clamped to each voiced run.
+  // are still never touched - segStart/segEnd are clamped to each voiced run.
   _applyEnvelopeNodes() {
     if (!this.preEnvelopeF0) return;
     const src     = this.preEnvelopeF0;
@@ -1539,7 +1641,7 @@ class F0Editor {
 
     this.envelopeNodes.push({ s, f, segStart: seg.lo, segEnd: seg.hi });
     // Apply immediately on placement so the curve snaps to the interpolated
-    // shape as you build out your control points — standard envelope behaviour.
+    // shape as you build out your control points - standard envelope behaviour.
     if (this.envelopeNodes.length >= 2) {
       this._applyEnvelopeNodes();
     }
@@ -1549,14 +1651,15 @@ class F0Editor {
 
   // ── Tool application ─────────────────────────────────────────────────────
   // Helper: returns false when enforceBoundaries is on and the frame was
-  // originally unvoiced — prevents any tool extending into silent regions.
+  // originally unvoiced - prevents any tool extending into silent regions.
   _canWrite(i) {
     return !this.enforceBoundaries || this.originalF0[i] > 0;
   }
 
-  _applyPen(sample, freq, prevSample, prevFreq) {
+  _applyPen(sample, freq, prevSample, prevFreq, snapFn = null) {
     if (prevSample === null || prevSample === sample) {
-      if (this._canWrite(sample)) this.currentF0[sample] = freq;
+      const f = snapFn ? snapFn(freq) : freq;
+      if (this._canWrite(sample)) this.currentF0[sample] = f;
       return;
     }
     const lo = Math.min(prevSample, sample), hi = Math.max(prevSample, sample);
@@ -1566,13 +1669,14 @@ class F0Editor {
       const f = prevSample < sample
         ? prevFreq + (freq - prevFreq) * t
         : freq     + (prevFreq - freq) * t;
-      this.currentF0[i] = Math.max(0, f);
+      const finalF = snapFn ? snapFn(Math.max(0, f)) : Math.max(0, f);
+      this.currentF0[i] = finalF;
     }
   }
   _applyEraser(sample, prevSample) {
     const lo = prevSample !== null ? Math.min(prevSample, sample) : sample;
     const hi = prevSample !== null ? Math.max(prevSample, sample) : sample;
-    // Eraser always works — silencing voiced frames is always intentional.
+    // Eraser always works - silencing voiced frames is always intentional.
     for (let i = lo; i <= hi; i++) this.currentF0[i] = 0;
   }
   _applySmoothBrush(centerSample, radius) {
@@ -1602,32 +1706,43 @@ class F0Editor {
   }
   // ── Pitch preview via Web Audio API ─────────────────────────────────────
   _previewPitch() {
-    if (this.selStart === null || this.selEnd === null) {
+    const allSels = this._getAllSelections();
+    if (!allSels.length) {
       document.getElementById('f0ed-sel-preview-status').textContent = 'no selection';
       return;
     }
-    const lo  = Math.min(this.selStart, this.selEnd);
-    const hi  = Math.max(this.selStart, this.selEnd);
+
     const f0  = this.currentF0;
     const hop = this.timeStepMs / 1000;   // seconds per f0 frame
-
-    // Render at 44100 Hz. Each f0 frame covers hopSamples audio samples.
     const SR         = 44100;
     const hopSamples = Math.round(hop * SR);
-    const nFrames    = hi - lo + 1;
-    const totalSamp  = nFrames * hopSamples;
-    const buf        = new Float32Array(totalSamp);
     const twoPi      = 2 * Math.PI;
 
-    const fLo = this.selFreqLo ?? 0;
-    const fHi = this.selFreqHi ?? Infinity;
+    // Overall time span covering all selections
+    const overallLo = Math.min(...allSels.map(s => Math.min(s.start, s.end)));
+    const overallHi = Math.max(...allSels.map(s => Math.max(s.start, s.end)));
 
-    // Render raw sine — GainNode handles all fades at audio-thread precision
+    // Build per-frame "is selected & voiced" mask
+    const nFrames    = overallHi - overallLo + 1;
+    const frameVoiced = new Uint8Array(nFrames);
+    for (const sel of allSels) {
+      const lo  = Math.min(sel.start, sel.end);
+      const hi  = Math.max(sel.start, sel.end);
+      const fLo = (sel.freqLo !== null) ? sel.freqLo  : 0;
+      const fHi = (sel.freqHi !== null) ? sel.freqHi  : Infinity;
+      for (let i = lo; i <= hi; i++) {
+        const freq = f0[i];
+        if (freq > 0 && freq >= fLo && freq <= fHi) frameVoiced[i - overallLo] = 1;
+      }
+    }
+
+    // Render raw sine
+    const totalSamp = nFrames * hopSamples;
+    const buf       = new Float32Array(totalSamp);
     let phase = 0;
     for (let fi = 0; fi < nFrames; fi++) {
-      const freq = f0[lo + fi];
-      // Silence frames outside the freq band (treat as unvoiced for preview)
-      if (freq <= 0 || freq < fLo || freq > fHi) { phase = 0; continue; }
+      if (!frameVoiced[fi]) { phase = 0; continue; }
+      const freq     = f0[overallLo + fi];
       const phaseInc = twoPi * freq / SR;
       const base     = fi * hopSamples;
       for (let s = 0; s < hopSamples; s++) {
@@ -1637,15 +1752,34 @@ class F0Editor {
       }
     }
 
-    // Stop any current preview, then play using a GainNode for click-free
-    // fades — gain automation is sample-accurate in the audio thread, unlike
-    // buffer-level amplitude which gets block-quantized and clicks.
+    // ── Click-free boundaries: find each voiced segment and apply short fades ──
+    // This eliminates the audible click at every voiced↔unvoiced zone boundary.
+    const fadeSamps = Math.round(0.006 * SR);   // 6 ms crossfade
+    const segments  = [];
+    let segS = -1;
+    for (let s = 0; s < totalSamp; s++) {
+      const nonZero = buf[s] !== 0;
+      if (nonZero && segS === -1) { segS = s; }
+      else if (!nonZero && segS !== -1) { segments.push([segS, s - 1]); segS = -1; }
+    }
+    if (segS !== -1) segments.push([segS, totalSamp - 1]);
+
+    for (const [s0, s1] of segments) {
+      const len = s1 - s0 + 1;
+      const f   = Math.min(fadeSamps, Math.floor(len / 2));
+      for (let k = 0; k < f; k++) {
+        buf[s0 + k]      *= k / f;           // fade in
+        buf[s1 - k]      *= k / f;           // fade out
+      }
+    }
+
+    // Stop any current preview, play with global ramp via GainNode
     try {
       if (this._previewCtx) { try { this._previewCtx.close(); } catch(_){} }
       this._previewCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
       const ctx      = this._previewCtx;
       const duration = totalSamp / SR;
-      const fadeT    = Math.min(0.040, duration * 0.15); // 40 ms or 15% whichever shorter
+      const fadeT    = Math.min(0.020, duration * 0.10);
 
       const abuf = ctx.createBuffer(1, totalSamp, SR);
       abuf.copyToChannel(buf, 0);
@@ -1653,7 +1787,7 @@ class F0Editor {
       const src  = ctx.createBufferSource();
       src.buffer = abuf;
 
-      // GainNode: ramp 0→1 at start, 1→0 at end — sub-sample accurate
+      // Overall start/end ramp for the whole clip
       const gain = ctx.createGain();
       gain.gain.setValueAtTime(0, ctx.currentTime);
       gain.gain.linearRampToValueAtTime(1, ctx.currentTime + fadeT);
@@ -1673,22 +1807,246 @@ class F0Editor {
     }
   }
 
+  // ── Semitone snap helper (for Shift+pen) ────────────────────────────────
+  _snapToSemitone(hz) {
+    if (hz <= 0) return hz;
+    // Convert to MIDI, round to nearest integer (semitone), convert back
+    const midi = 69 + 12 * Math.log2(hz / 440);
+    return 440 * Math.pow(2, (Math.round(midi) - 69) / 12);
+  }
+
+  // ── Selection helpers ────────────────────────────────────────────────────
+  // Returns all selections (main + extras) as a uniform array
+  _getAllSelections() {
+    const out = [];
+    if (this.selStart !== null && this.selEnd !== null) {
+      out.push({
+        start:  this.selStart,
+        end:    this.selEnd,
+        freqLo: this.selFreqLo,
+        freqHi: this.selFreqHi,
+      });
+    }
+    for (const s of this.extraSelections) out.push(s);
+    return out;
+  }
+
+  // True if (sample, cursorFreq) falls inside a selection region
+  _isInsideSel(sample, cursorFreq, sel) {
+    const lo = Math.min(sel.start, sel.end);
+    const hi = Math.max(sel.start, sel.end);
+    if (sample < lo || sample > hi) return false;
+    // Column mode: freqLo/Hi are null → any freq matches
+    if (sel.freqLo === null || sel.freqHi === null) return true;
+    return cursorFreq >= sel.freqLo && cursorFreq <= sel.freqHi;
+  }
+
+  // Iterate every UNIQUE frame index that is inside any selection AND passes
+  // the per-selection freq filter against the actual currentF0 value.
+  // cb(i) is called once per qualifying frame.
+  _forEachSelectedFrame(cb) {
+    const allSels = this._getAllSelections();
+    if (!allSels.length) return;
+    const touched = new Uint8Array(this.currentF0.length);
+    for (const sel of allSels) {
+      const lo  = Math.min(sel.start, sel.end);
+      const hi  = Math.max(sel.start, sel.end);
+      const fLo = (sel.freqLo !== null) ? sel.freqLo  : 0;
+      const fHi = (sel.freqHi !== null) ? sel.freqHi  : Infinity;
+      for (let i = lo; i <= hi; i++) {
+        if (touched[i]) continue;
+        const f = this.currentF0[i];
+        if (f > 0 && f >= fLo && f <= fHi) { cb(i); touched[i] = 1; }
+      }
+    }
+  }
+
+  // Sync col/rect mode button highlight
+  _updateSelModeUI() {
+    document.getElementById('f0ed-sel-mode-col')?.classList.toggle('active',  this.selMode === 'column');
+    document.getElementById('f0ed-sel-mode-rect')?.classList.toggle('active', this.selMode === 'rect');
+  }
+
+  // Draw ALL selections as a single merged geometry.
+  // Uses a pixel-column scan-line approach:
+  //   1. Collect unique x boundaries from all selections.
+  //   2. For each x segment, compute the union of Y intervals (merging overlaps).
+  //   3. Fill merged intervals — no double-alpha because each pixel is filled once.
+  //   4. Trace only the outer boundary as a single stroke path.
+  _drawMergedSelections(ctx, H) {
+    const allSels = this._getAllSelections();
+    if (!allSels.length) return;
+
+    const W = this.ovCanvas.width;
+
+    // Convert each selection to pixel-space rectangle
+    const px = allSels.map(sel => ({
+      x1: Math.round(this._sampleToX(Math.min(sel.start, sel.end))),
+      x2: Math.round(this._sampleToX(Math.max(sel.start, sel.end))),
+      y1: sel.freqLo === null ? 0 : Math.round(this._freqToY(sel.freqHi)),
+      y2: sel.freqLo === null ? H : Math.round(this._freqToY(sel.freqLo)),
+    }));
+
+    // Collect unique x-break points
+    const xSet = new Set();
+    for (const p of px) { xSet.add(p.x1); xSet.add(p.x2); }
+    const xs = [...xSet].sort((a, b) => a - b);
+    if (xs.length < 2) return;
+
+    // For each x-column segment, compute merged Y intervals
+    const cols = [];
+    for (let k = 0; k < xs.length - 1; k++) {
+      const xMid = (xs[k] + xs[k + 1]) / 2;
+      const raw  = [];
+      for (const p of px) {
+        if (xMid < p.x1 || xMid >= p.x2) continue;
+        raw.push([p.y1, p.y2]);
+      }
+      if (!raw.length) { cols.push({ x1: xs[k], x2: xs[k + 1], merged: [] }); continue; }
+      raw.sort((a, b) => a[0] - b[0]);
+      const merged = [[...raw[0]]];
+      for (let i = 1; i < raw.length; i++) {
+        const last = merged[merged.length - 1];
+        if (raw[i][0] <= last[1] + 1) last[1] = Math.max(last[1], raw[i][1]);
+        else merged.push([...raw[i]]);
+      }
+      cols.push({ x1: xs[k], x2: xs[k + 1], merged });
+    }
+
+    ctx.save();
+
+    // ── Fill pass: each pixel filled exactly once → no double-alpha ───────
+    ctx.fillStyle = 'rgba(120,120,255,0.18)';
+    for (const col of cols) {
+      for (const [y1, y2] of col.merged) {
+        ctx.fillRect(col.x1, y1, col.x2 - col.x1, y2 - y1);
+      }
+    }
+
+    // ── Border pass: trace outer boundary only ────────────────────────────
+    // Strategy: for each column segment draw its top+bottom horizontal edges.
+    // For vertical edges (left/right of column), only draw the sub-intervals
+    // that are NOT covered by the adjacent column's merged set — these are the
+    // "step" edges where coverage starts or stops.
+    ctx.strokeStyle = 'rgba(180,180,255,0.65)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+
+    // Helper: find uncovered sub-intervals of [y1,y2] given an adjacent merged list
+    const uncovered = (y1, y2, adjMerged) => {
+      // Start with the full interval, subtract every adjacent interval
+      let remaining = [[y1, y2]];
+      for (const [ay1, ay2] of adjMerged) {
+        const next = [];
+        for (const [ry1, ry2] of remaining) {
+          if (ay2 < ry1 || ay1 > ry2) { next.push([ry1, ry2]); continue; }
+          if (ay1 > ry1) next.push([ry1, ay1]);
+          if (ay2 < ry2) next.push([ay2, ry2]);
+        }
+        remaining = next;
+      }
+      return remaining;
+    };
+
+    for (let k = 0; k < cols.length; k++) {
+      const col      = cols[k];
+      if (!col.merged.length) continue;
+      const prevMerged = k > 0              ? cols[k - 1].merged : [];
+      const nextMerged = k < cols.length - 1 ? cols[k + 1].merged : [];
+
+      for (const [cy1, cy2] of col.merged) {
+        // Horizontal top edge: draw the portion not covered by prevMerged (coming from left)
+        // and not covered by nextMerged either side — but simpler: just draw full width,
+        // only omit where BOTH neighbours have the same top boundary (interior horizontal).
+        const prevHasTop  = prevMerged.some(([py1]) => py1 === cy1);
+        const nextHasTop  = nextMerged.some(([ny1]) => ny1 === cy1);
+        if (!prevHasTop || !nextHasTop) {
+          ctx.moveTo(col.x1, cy1); ctx.lineTo(col.x2, cy1);
+        }
+
+        // Horizontal bottom edge: same logic
+        const prevHasBot  = prevMerged.some(([, py2]) => py2 === cy2);
+        const nextHasBot  = nextMerged.some(([, ny2]) => ny2 === cy2);
+        if (!prevHasBot || !nextHasBot) {
+          ctx.moveTo(col.x1, cy2); ctx.lineTo(col.x2, cy2);
+        }
+
+        // Left vertical edge: segments of [cy1,cy2] not covered by prevMerged
+        for (const [vy1, vy2] of uncovered(cy1, cy2, prevMerged)) {
+          ctx.moveTo(col.x1, vy1); ctx.lineTo(col.x1, vy2);
+        }
+
+        // Right vertical edge: segments of [cy1,cy2] not covered by nextMerged
+        for (const [vy1, vy2] of uncovered(cy1, cy2, nextMerged)) {
+          ctx.moveTo(col.x2, vy1); ctx.lineTo(col.x2, vy2);
+        }
+      }
+    }
+
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // True if two selections overlap in BOTH the time and frequency axes.
+  // Column selections (freqLo/Hi = null) span the full freq range.
+  _selectionsOverlap(a, b) {
+    // Time overlap
+    const aLo = Math.min(a.start, a.end), aHi = Math.max(a.start, a.end);
+    const bLo = Math.min(b.start, b.end), bHi = Math.max(b.start, b.end);
+    if (aHi < bLo || bHi < aLo) return false;
+
+    // Freq overlap — null means 0..Infinity (column mode)
+    const aFL = a.freqLo ?? 0,       aFH = a.freqHi ?? Infinity;
+    const bFL = b.freqLo ?? 0,       bFH = b.freqHi ?? Infinity;
+    return aFH >= bFL && bFH >= aFL;
+  }
+
+  // Given the index of a clicked selection inside _getAllSelections(), return
+  // the indices (in the same array) of every selection in its connected overlap
+  // group (direct + transitive neighbours).
+  _getOverlapGroup(hitIdx) {
+    const all    = this._getAllSelections();
+    const inGroup = new Set([hitIdx]);
+    let   changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = 0; i < all.length; i++) {
+        if (inGroup.has(i)) continue;
+        for (const j of inGroup) {
+          if (this._selectionsOverlap(all[i], all[j])) {
+            inGroup.add(i); changed = true; break;
+          }
+        }
+      }
+    }
+    return [...inGroup];
+  }
+
   transposeSelection(semitones) {
-    if (this.selStart === null || this.selEnd === null) return;
-    const lo   = Math.min(this.selStart, this.selEnd);
-    const hi   = Math.max(this.selStart, this.selEnd);
+    const allSels = this._getAllSelections();
+    if (!allSels.length) return;
     const mult = Math.pow(2, semitones / 12);
-    // Freq bounds: if rect selection has them, only transpose frames inside the band.
-    const fLo  = this.selFreqLo ?? 0;
-    const fHi  = this.selFreqHi ?? Infinity;
-    for (let i = lo; i <= hi; i++) {
-      const f = this.currentF0[i];
-      if (f > 0 && f >= fLo && f <= fHi)
-        this.currentF0[i] = clamp(f * mult, 20, 1200);
+
+    // Build the locked frame list on first use.  We intentionally do NOT
+    // re-evaluate the frequency filter here — once frames are locked they stay
+    // locked regardless of where their pitches move, so repeated semitone/octave
+    // steps keep working even after pitches leave the original rect band.
+    if (!this.selLockedFrames) {
+      this.selLockedFrames = [];
+      this._forEachSelectedFrame(i => this.selLockedFrames.push(i));
+    }
+
+    for (const i of this.selLockedFrames) {
+      if (this.currentF0[i] > 0)
+        this.currentF0[i] = clamp(this.currentF0[i] * mult, 20, 2400);
     }
     this._pushHistory();
     this._renderAll();
   }
+
+  // Clear locked frames whenever selection geometry changes so the next
+  // transpose re-captures frames from the updated selection.
+  _invalidateLock() { this.selLockedFrames = null; }
 
   // ── Mouse events ─────────────────────────────────────────────────────────
   _getCanvasPos(e) {
@@ -1737,17 +2095,66 @@ class F0Editor {
 
     this.isDrawing  = true;
     this.lastSample = sample;
-    this.lastFreq   = freq;
+    // For pen+shift: record the snapped freq as the stroke anchor so the very
+    // first segment is also interpolated between two clean semitone values.
+    this.lastFreq   = (this.activeTool === 'pen' && e.shiftKey)
+      ? this._snapToSemitone(freq) : freq;
     this.smoothPts  = [];
     this.smoothHead = null;
 
     if (this.activeTool === 'line') {
       this.lineStart = { s: sample, f: freq };
     } else if (this.activeTool === 'select') {
+      // ── Check if cursor is inside any selection → drag its overlap group ──
+      // Exception: Shift held means "add a new selection", never drag.
+      const allSels = this._getAllSelections();
+      const hitIdx  = e.shiftKey ? -1 : allSels.findIndex(s => this._isInsideSel(sample, freq, s));
+      if (hitIdx >= 0) {
+        // Compute the transitive overlap group of the clicked selection.
+        // If all selections overlap/touch → drag everything as one fused object.
+        // If the clicked one is isolated → drag only it.
+        const group = this._getOverlapGroup(hitIdx);
+        this.isDrawing         = false;
+        this.selIsDragging     = true;
+        this.selDragMoved      = false;
+        // 'all' if the whole group = all selections, otherwise store the group indices
+        this.selDragWhich      = group.length === allSels.length ? 'all' : group;
+        this.selDragStartSamp  = sample;
+        this.selDragStartFreq  = freq;
+        this.selDragInitMain   = (this.selStart !== null)
+          ? { start: this.selStart, end: this.selEnd, freqLo: this.selFreqLo, freqHi: this.selFreqHi }
+          : null;
+        this.selDragInitExtra  = this.extraSelections.map(s => ({ ...s }));
+        this.ovCanvas.style.cursor = 'grabbing';
+        return;
+      }
+
+      // ── Start a new selection ─────────────────────────────────────────────
+      if (e.shiftKey) {
+        // Shift held: save the current main selection into extras BEFORE starting
+        // the new one, so the user never has to hold shift from the very first drag.
+        if (this.selStart !== null && this.selEnd !== null
+            && this.selStart !== this.selEnd) {
+          this.extraSelections.push({
+            start:  this.selStart,  end:    this.selEnd,
+            freqLo: this.selFreqLo, freqHi: this.selFreqHi,
+          });
+        }
+      } else {
+        // No shift: clear everything and start fresh
+        this.extraSelections = [];
+      }
+      this._invalidateLock();  // geometry is about to change
       this.selStart  = sample;
       this.selEnd    = sample;
-      this.selFreqLo = freq;
-      this.selFreqHi = freq;
+      // Column mode: null freqLo/Hi means full height
+      if (this.selMode === 'column') {
+        this.selFreqLo = null;
+        this.selFreqHi = null;
+      } else {
+        this.selFreqLo = freq;
+        this.selFreqHi = freq;
+      }
     } else if (this.activeTool === 'vibrato') {
       // Snapshot current curve at stroke start. Every mousemove re-applies
       // vibrato from this clean base → no accumulation within one stroke.
@@ -1774,7 +2181,7 @@ class F0Editor {
     document.getElementById('f0ed-cur-note').textContent =
       curFreq > 0 ? hzToNoteName(curFreq) : '–';
 
-    // Y pan (right-drag) — inverted: drag down → see lower frequencies
+    // Y pan (right-drag) - inverted: drag down → see lower frequencies
     if (this.isYPanning) {
       const dy      = e.clientY - this.yPanStartY;
       const range   = this.yPanStartMax - this.yPanStartMin;
@@ -1783,10 +2190,10 @@ class F0Editor {
       let newMin = this.yPanStartMin + delta;
       let newMax = this.yPanStartMax + delta;
       if (newMin < 20)   { newMin = 20;   newMax = 20 + range; }
-      if (newMax > 8000) { newMax = 8000; newMin = 8000 - range; }
+      if (newMax > F0_MAX) { newMax = F0_MAX; newMin = F0_MAX - range; }
       this.yMin = newMin;
       this.yMax = newMax;
-      this._renderAll();
+      this._markAll();
       return;
     }
 
@@ -1809,14 +2216,14 @@ class F0Editor {
       let newMin = this.yPanStartMin + deltaHz;
       let newMax = this.yPanStartMax + deltaHz;
       if (newMin < 20)   { newMin = 20;   newMax = 20 + range; }
-      if (newMax > 8000) { newMax = 8000; newMin = 8000 - range; }
+      if (newMax > F0_MAX) { newMax = F0_MAX; newMin = F0_MAX - range; }
       this.yMin = newMin;
       this.yMax = newMax;
 
-      this._renderAll(); return;
+      this._markAll(); return;
     }
 
-    // Envelope node drag — X+Y, clamped to that node's voiced segment
+    // Envelope node drag - X+Y, clamped to that node's voiced segment
     if (this.envDragging !== null) {
       const n      = this.envelopeNodes[this.envDragging];
       const rawS   = this._xToSample(x);
@@ -1826,16 +2233,89 @@ class F0Editor {
       n.f = Math.max(20, rawF);
       // Restore from pre-envelope snapshot, then re-apply all nodes cleanly
       this._applyEnvelopeNodes();
-      this._renderAll(); return;
+      this._markCurve(); this._markOverlay(); return;
     }
 
-    if (!this.isDrawing) { this._drawOverlay(); return; }
+    if (!this.isDrawing && !this.selIsDragging) { this._markOverlay(); return; }
 
     const freq = this._yToFreq(y);
     const tool = this.activeTool;
 
+    // ── Selection drag ────────────────────────────────────────────────────
+    if (this.selIsDragging) {
+      const deltaSamp = sample - this.selDragStartSamp;
+      const deltaHz   = freq   - this.selDragStartFreq;
+
+      // Only mark as moved if the cursor has shifted at least 1 sample or ~1 Hz
+      if (Math.abs(deltaSamp) >= 1 || Math.abs(deltaHz) >= 1) this.selDragMoved = true;
+      const n = this.currentF0.length - 1;
+
+      // Helper: shift one sel snapshot by both X and Y deltas.
+      // freqLo/Hi are only shifted for rect selections (column ones are null).
+      const shifted = (init) => {
+        const out = {
+          ...init,
+          start: clamp(init.start + deltaSamp, 0, n),
+          end:   clamp(init.end   + deltaSamp, 0, n),
+        };
+        if (init.freqLo !== null && init.freqHi !== null) {
+          const newLo = Math.max(20,      init.freqLo + deltaHz);
+          const newHi = Math.min(F0_MAX,  init.freqHi + deltaHz);
+          if (newLo < newHi) { out.freqLo = newLo; out.freqHi = newHi; }
+        }
+        return out;
+      };
+
+      if (this.selDragWhich === 'all') {
+        // Move every piece of the fused selection together
+        if (this.selDragInitMain) {
+          const s = shifted(this.selDragInitMain);
+          this.selStart = s.start; this.selEnd = s.end;
+          this.selFreqLo = s.freqLo; this.selFreqHi = s.freqHi;
+        }
+        this.extraSelections = this.selDragInitExtra.map(shifted);
+      } else if (Array.isArray(this.selDragWhich)) {
+        // Move only the overlapping group — indices are into _getAllSelections()
+        // which is [main, ...extras]. Index 0 = main, index k>0 = extras[k-1].
+        for (const idx of this.selDragWhich) {
+          if (idx === 0 && this.selDragInitMain) {
+            const s = shifted(this.selDragInitMain);
+            this.selStart = s.start; this.selEnd = s.end;
+            this.selFreqLo = s.freqLo; this.selFreqHi = s.freqHi;
+          } else if (idx > 0) {
+            const init = this.selDragInitExtra[idx - 1];
+            if (init) this.extraSelections[idx - 1] = shifted(init);
+          }
+        }
+      } else {
+        // Legacy single-index path (kept for safety)
+        const which = this.selDragWhich;
+        if (which === 0 && this.selDragInitMain) {
+          const s = shifted(this.selDragInitMain);
+          this.selStart = s.start; this.selEnd   = s.end;
+          this.selFreqLo = s.freqLo; this.selFreqHi = s.freqHi;
+        } else if (which > 0) {
+          const init = this.selDragInitExtra[which - 1];
+          if (init) this.extraSelections[which - 1] = shifted(init);
+        }
+      }
+      this._markOverlay();
+      return;
+    }
+
+    // ── Cursor feedback when hovering over a selection ────────────────────
+    if (tool === 'select' && !this.isDrawing) {
+      const allSels = this._getAllSelections();
+      const over = allSels.some(s => this._isInsideSel(sample, freq, s));
+      this.ovCanvas.style.cursor = over ? 'move' : 'crosshair';
+    }
+
     if (tool === 'pen') {
-      this._applyPen(sample, freq, this.lastSample, this.lastFreq);
+      // Shift → snap every written frame to nearest semitone (snapFn covers both
+      // the endpoint AND every interpolated frame in between, so nothing slips through)
+      const snapFn   = e.shiftKey ? (hz => this._snapToSemitone(hz)) : null;
+      const drawFreq = snapFn ? snapFn(freq) : freq;
+      this._applyPen(sample, drawFreq, this.lastSample, this.lastFreq, snapFn);
     } else if (tool === 'smoothpen') {
       const alpha = 1.0 - (parseFloat(document.getElementById('f0ed-smooth-amount').value) || 0.5);
       if (!this.smoothHead) {
@@ -1844,21 +2324,26 @@ class F0Editor {
         this.smoothHead.x += alpha * (sample - this.smoothHead.x);
         this.smoothHead.y += alpha * (freq   - this.smoothHead.y);
       }
-      const sx = Math.round(this.smoothHead.x);
-      const sy = this.smoothHead.y;
-      this._applyPen(sx, sy, this.lastSample, this.lastFreq);
+      const sx     = Math.round(this.smoothHead.x);
+      const snapFn = e.shiftKey ? (hz => this._snapToSemitone(hz)) : null;
+      const sy     = snapFn ? snapFn(this.smoothHead.y) : this.smoothHead.y;
+      this._applyPen(sx, sy, this.lastSample, this.lastFreq, snapFn);
     } else if (tool === 'eraser') {
       this._applyEraser(sample, this.lastSample);
     } else if (tool === 'smooth') {
       const r = parseInt(document.getElementById('f0ed-brushradius').value) || 6;
       this._applySmoothBrush(sample, r);
     } else if (tool === 'select') {
-      this.selEnd    = sample;
-      this.selFreqLo = Math.min(this.selFreqLo ?? freq, freq);
-      this.selFreqHi = Math.max(this.selFreqHi ?? freq, freq);
+      this.selEnd = sample;
+      if (this.selMode === 'rect') {
+        // Rectangle mode: expand freq bounds with cursor
+        this.selFreqLo = Math.min(this.selFreqLo ?? freq, freq);
+        this.selFreqHi = Math.max(this.selFreqHi ?? freq, freq);
+      }
+      // Column mode: freqLo/Hi stay null (full height)
     } else if (tool === 'vibrato') {
       if (this.vibratoBase) {
-        // Expand rightward only — moving left never shrinks or re-amplifies
+        // Expand rightward only - moving left never shrinks or re-amplifies
         if (sample > this.vibratoMax) this.vibratoMax = sample;
         // Re-apply from clean snapshot each frame so result is always identical
         // regardless of mouse speed, jitter, or retracing
@@ -1873,12 +2358,21 @@ class F0Editor {
 
     if (tool === 'smoothpen' && this.smoothHead) {
       this.lastSample = Math.round(this.smoothHead.x);
-      this.lastFreq   = this.smoothHead.y;
+      this.lastFreq   = e.shiftKey ? this._snapToSemitone(this.smoothHead.y) : this.smoothHead.y;
     } else {
       this.lastSample = sample;
-      this.lastFreq   = freq;
+      // For pen+shift: store snapped freq so next frame's interpolation starts
+      // from a clean semitone boundary, not a raw in-between value.
+      this.lastFreq   = (tool === 'pen' && e.shiftKey) ? this._snapToSemitone(freq) : freq;
     }
-    this._renderAll();
+
+    // Only the curve layer changed during drawing; overlay for line/select preview
+    if (tool === 'select' || tool === 'line') {
+      this._markOverlay();
+    } else {
+      this._markCurve();
+      this._markOverlay();
+    }
   }
 
   _onMouseUp(e) {
@@ -1889,6 +2383,25 @@ class F0Editor {
     if (this.envDragging !== null) {
       this.envDragging = null;
       this._pushHistory();
+      this._renderAll();
+      return;
+    }
+
+    // Finish selection drag
+    if (this.selIsDragging) {
+      this.selIsDragging  = false;
+      this.selDragWhich   = null;
+      this.selDragInitMain  = null;
+      this.selDragInitExtra = [];
+      this.ovCanvas.style.cursor = 'crosshair';
+      // Click without moving → clear ALL selections (iZotope RX behaviour)
+      if (!this.selDragMoved) {
+        this.selStart = this.selEnd = null;
+        this.selFreqLo = this.selFreqHi = null;
+        this.extraSelections = [];
+      }
+      this.selDragMoved = false;
+      this._invalidateLock();   // position changed, re-capture on next transpose
       this._renderAll();
       return;
     }
@@ -1916,6 +2429,14 @@ class F0Editor {
         this.currentF0[i] = Math.max(0, f0 + (freq - f0) * t);
       }
       this.lineStart = null;
+    } else if (this.activeTool === 'select') {
+      // Zero-width click outside existing selections → clear all (iZotope RX behaviour)
+      if (this.selStart === this.selEnd) {
+        this.selStart = this.selEnd = null;
+        this.selFreqLo = this.selFreqHi = null;
+        this.extraSelections = [];
+        this._invalidateLock();
+      }
     }
     this._pushHistory();
     this._renderAll();
@@ -1926,10 +2447,11 @@ class F0Editor {
     const { x, y } = this._getCanvasPos(e);
 
     if (e.altKey) {
-      // Alt+scroll → zoom Y axis around cursor frequency
-      const pivotHz = this._yToFreq(y);
-      const factor  = e.deltaY > 0 ? 1.25 : 0.8;
-      this._zoomY(factor, pivotHz);
+      // Alt+scroll → zoom Y axis anchored to the bottom of the view (yMin).
+      // Scrolling up (zoom in) contracts the range downward; scrolling down
+      // (zoom out) expands upward — the bottom edge always stays fixed.
+      const factor = e.deltaY > 0 ? 1.25 : 0.8;
+      this._zoomY(factor, this.yMin);
       return;
     }
 
@@ -2109,6 +2631,12 @@ class F0Editor {
     });
 
     // Selection transpose buttons
+    document.getElementById('f0ed-sel-mode-col')?.addEventListener('click', () => {
+      this.selMode = 'column'; this._updateSelModeUI();
+    });
+    document.getElementById('f0ed-sel-mode-rect')?.addEventListener('click', () => {
+      this.selMode = 'rect'; this._updateSelModeUI();
+    });
     document.getElementById('f0ed-sel-up-semi').addEventListener('click',   () => this.transposeSelection(1));
     document.getElementById('f0ed-sel-down-semi').addEventListener('click', () => this.transposeSelection(-1));
     document.getElementById('f0ed-sel-up-oct').addEventListener('click',    () => this.transposeSelection(12));
@@ -2116,6 +2644,8 @@ class F0Editor {
     document.getElementById('f0ed-sel-clear').addEventListener('click', () => {
       this.selStart = this.selEnd = null;
       this.selFreqLo = this.selFreqHi = null;
+      this.extraSelections = [];
+      this._invalidateLock();
       this._drawOverlay();
     });
     document.getElementById('f0ed-sel-preview').addEventListener('click', () => this._previewPitch());
@@ -2127,11 +2657,33 @@ class F0Editor {
       if (e.ctrlKey && !e.shiftKey && e.key === 'z') { e.preventDefault(); this.undo(); }
       if ((e.ctrlKey && e.shiftKey && e.key === 'Z') ||
           (e.ctrlKey && e.key === 'y'))               { e.preventDefault(); this.redo(); }
-      // 1–8: switch tools — only when cursor is over the editor panel
+      // 1–8: switch tools - only when cursor is over the editor panel
       const toolIdx = parseInt(e.key) - 1;
       if (this.isHovered && !e.ctrlKey && !e.altKey && !e.shiftKey && toolIdx >= 0 && toolIdx < TOOL_KEYS.length) {
         this._activateTool(TOOL_KEYS[toolIdx]);
       }
+      // R / T: toggle selection mode (only when hovered, not eating text inputs)
+      if (this.isHovered && !e.ctrlKey && !e.altKey) {
+        if (e.key === 'r' || e.key === 'R') { this.selMode = 'rect';   this._updateSelModeUI(); }
+        if (e.key === 't' || e.key === 'T') { this.selMode = 'column'; this._updateSelModeUI(); }
+      }
+      // Track Shift for pen-snap
+      if (e.key === 'Shift') this.shiftDown = true;
+
+      // Shift+Up/Down → ±1 semitone  |  Ctrl+Up/Down → ±1 octave
+      // (only when hovered and a selection exists)
+      if (this.isHovered && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const hasSel = this._getAllSelections().length > 0;
+        if (hasSel && (e.shiftKey || e.ctrlKey) && !e.altKey) {
+          e.preventDefault();
+          const dir  = e.key === 'ArrowUp' ? 1 : -1;
+          const step = e.ctrlKey ? 12 : 1;   // octave vs semitone
+          this.transposeSelection(dir * step);
+        }
+      }
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === 'Shift') this.shiftDown = false;
     });
   }
 
@@ -2154,6 +2706,13 @@ class F0Editor {
       // Drop envelope drag without pushing history (drag left canvas)
       if (this.envDragging !== null) {
         this.envDragging = null;
+        this._renderAll();
+      }
+      // Drop selection drag without committing
+      if (this.selIsDragging) {
+        this.selIsDragging = false;
+        this.selDragWhich  = null;
+        this.ovCanvas.style.cursor = 'crosshair';
         this._renderAll();
       }
     });
@@ -2188,8 +2747,8 @@ class F0Editor {
 
   // ── Preset helpers ────────────────────────────────────────────────────────
   // Communication via two hidden Gradio textboxes:
-  //   #f0ed_preset_cmd    — JS writes command JSON → Python handles → writes result
-  //   #f0ed_preset_result — Python writes result JSON → JS reads via MutationObserver
+  //   #f0ed_preset_cmd    - JS writes command JSON → Python handles → writes result
+  //   #f0ed_preset_result - Python writes result JSON → JS reads via MutationObserver
 
   _writePresetCmd(payload) {
     const el = document.querySelector('#f0ed_preset_cmd textarea');
@@ -2215,7 +2774,7 @@ class F0Editor {
     const prev = sel.value;
     sel.innerHTML = '';
     if (!names || names.length === 0) {
-      sel.innerHTML = '<option value="">— no presets saved —</option>';
+      sel.innerHTML = '<option value="">- no presets saved -</option>';
     } else {
       names.forEach(n => {
         const opt = document.createElement('option');
@@ -2310,10 +2869,10 @@ class F0Editor {
 
     let result;
     if (pLen === n) {
-      // Same song — copy 1:1, no resampling needed
+      // Same song - copy 1:1, no resampling needed
       result = Float32Array.from(presetFreqs);
     } else {
-      // Different song length — linear resample to fit
+      // Different song length - linear resample to fit
       result = new Float32Array(n);
       for (let i = 0; i < n; i++) {
         const t  = (i / (n - 1)) * (pLen - 1);
@@ -2401,7 +2960,7 @@ function initEditor() {
       if (!val || val === 'null' || val === lastSeenValue) return;
       lastSeenValue = val;
       if (!ensureEditor()) {
-        // Editor DOM not ready yet — retry once after a short delay
+        // Editor DOM not ready yet - retry once after a short delay
         setTimeout(() => handleValue(val), 200);
         return;
       }
@@ -2422,7 +2981,7 @@ function initEditor() {
   function waitForTextarea() {
     const el = document.querySelector('#f0_data_for_editor textarea');
     if (el) { attachObserver(el); return; }
-    // Textarea not in DOM yet — poll briefly until it appears, then stop
+    // Textarea not in DOM yet - poll briefly until it appears, then stop
     const timer = setInterval(() => {
       const found = document.querySelector('#f0_data_for_editor textarea');
       if (found) { clearInterval(timer); attachObserver(found); }

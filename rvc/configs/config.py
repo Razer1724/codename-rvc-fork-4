@@ -20,10 +20,10 @@ arch_config_paths = {
         os.path.join("ringformer_v2", "32000.json"),
         os.path.join("ringformer_v2", "24000.json"),
     ],
-    "alpex_gan": [
-        os.path.join("alpex_gan", "48000.json"),
-        os.path.join("alpex_gan", "40000.json"),
-        os.path.join("alpex_gan", "32000.json"),
+    "apex_gan": [
+        os.path.join("apex_gan", "48000.json"),
+        os.path.join("apex_gan", "40000.json"),
+        os.path.join("apex_gan", "32000.json"),
     ],
 }
 
@@ -109,7 +109,7 @@ class Config:
             except FileNotFoundError:
                 print(f"File not found: {full_config_path}")
 
-        for config_path in arch_config_paths["alpex_gan"]:
+        for config_path in arch_config_paths["apex_gan"]:
             full_config_path = os.path.join("rvc", "configs", config_path)
             try:
                 with open(full_config_path, "r") as f:

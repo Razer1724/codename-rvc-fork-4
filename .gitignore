@@ -14,6 +14,8 @@
 !logs/run_tensorboard_in_model_folder.bat
 !rvc/models/pretraineds/.gitkeep
 !rvc/models/pretraineds/hifi-gan/.gitkeep
+!rvc/models/pretraineds/apex-gan/.gitkeep
+!rvc/models/pretraineds/refinegan/.gitkeep
 !rvc/models/pretraineds/custom/.gitkeep
 # Files to be ignored  ==========================
 env/
@@ -28,6 +30,10 @@ assets/datasets/
 assets/audios/audio-others/
 logs/
 rvc/models/pretraineds/
+rvc/models/pretraineds/hifi-gan
+rvc/models/pretraineds/apex-gan
+rvc/models/pretraineds/refinegan
+rvc/models/pretraineds/custom
 rvc/models/predictors/fcpe.pt
 rvc/models/predictors/fcpe_ddsp.pt
 rvc/models/predictors/rmvpe.pt
@@ -39,7 +45,7 @@ rvc/models/embedders/spin_v2/config.json
 rvc/models/embedders/contentvec/config.json
 rvc/models/smartcutter/
 rvc/lib/algorithm/generators/Vocoder_Experiments
-rvc/train/preprocess/preprocess_old - backup.py
+rvc/train/preprocess/silero_vad
 DEV/
 *.pyc
 EXTRAS/transfer.py

@@ -90,143 +90,43 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
 
     return loss
 
-def discriminator_prls_loss(disc_real_outputs, disc_generated_outputs):
+
+def discriminator_tprls_loss(disc_real_outputs, disc_generated_outputs):
     """
-    PRLSGAN Discriminator Loss
+    TPRLS Discriminator Loss
     """
-    loss = 0
-    lambda_rls = 0.4
-    m = 1.0
-
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        dr = dr.float()
-        dg = dg.float()
-
-        mse_loss = torch.mean((1 - dr) ** 2) + torch.mean(dg ** 2)
-        rls_loss = torch.mean(torch.clamp(m - (dr - dg), min=0) ** 2)
-
-        loss += mse_loss + (lambda_rls * rls_loss)
-
-    return loss
-
-
-def generator_prls_loss(disc_real_outputs, disc_generated_outputs):
-    """
-    PRLSGAN Generator Loss 
-    """
-    loss = 0
-    lambda_rls = 0.4
-    lambda_adv = 4.0
-    m = 1.0
-    
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        dr = dr.float()
-        dg = dg.float()
-
-        mse_gen_loss = lambda_adv * torch.mean((1 - dg) ** 2)
-
-        rls_gen_loss = torch.mean(torch.clamp(m - (dg - dr), min=0) ** 2)
-
-        loss += mse_gen_loss + (lambda_rls * rls_gen_loss)
-
-    return loss
-
-
-
-def discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
     loss = 0
     tau = 0.04
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         dr = dr.float()
         dg = dg.float()
-
-        # Median centering
-        m_DG = torch.median((dr - dg))
-
-        # Relative difference
-        # We only penalize when the Real sample is NOT sufficiently better than Fake
-        # Condition: Real < Fake + Margin
+        m_DG = torch.median(dr - dg)
         diff = (dr - dg) - m_DG
         mask = dr < (dg + m_DG)
-
-        # Calculate Squared Error on the masked (hard) examples
-        # We use empty-safe mean calculation
-        masked_diff = diff[mask]
-        if masked_diff.numel() > 0:
-            L_rel = torch.mean(masked_diff ** 2)
-        else:
-            L_rel = torch.tensor(0.0, device=dr.device)
-
-        # Truncate the loss (clamp)
+        masked = diff[mask]
+        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dr.device)
         loss += tau - F.relu(tau - L_rel)
-
     return loss
 
 
-def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
+def generator_tprls_loss(disc_real_outputs, disc_generated_outputs):
+    """
+    TPRLS Generator Loss
+    """
     loss = 0
     tau = 0.04
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         dr = dr.float()
         dg = dg.float()
-        
-        # Median centering (Fake - Real)
-        diff = dg - dr 
+        diff = dg - dr
         m_DG = torch.median(diff)
-
-        # Relative difference
-        # Generator wants Fake > Real. 
-        # We penalize when Fake is NOT sufficiently better than Real
-        # Condition: Fake < Real + Margin
-        rel_diff = diff - m_DG
+        rel = diff - m_DG
         mask = diff < m_DG
-
-        masked_diff = rel_diff[mask]
-        if masked_diff.numel() > 0:
-            L_rel = torch.mean(masked_diff ** 2)
-        else:
-            L_rel = torch.tensor(0.0, device=dg.device)
-
-        # Truncate the loss (clamp)
+        masked = rel[mask]
+        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dg.device)
         loss += tau - F.relu(tau - L_rel)
-
     return loss
 
-def discriminator_loss_v2(disc_real_outputs, disc_generated_outputs):
-    """
-    Compute the discriminator loss for real and generated outputs.
-    """
-    loss = 0
-
-    # LSGAN Loss
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        r_loss = torch.mean((1 - dr.float()) ** 2)
-        g_loss = torch.mean(dg.float() ** 2)
-        loss += r_loss + g_loss
-
-    # TPRLS Loss
-    loss_rel = discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs)
-    loss += loss_rel
-
-    return loss
-
-
-def generator_loss_v2(disc_outputs, disc_real_outputs):
-    """
-    LSGAN Generator Loss + TPRLS
-    """
-    loss = 0
-
-    # Existing LSGAN Loss
-    for dg in disc_outputs:
-        l = torch.mean((1 - dg.float()) ** 2)
-        loss += l
-
-    # TPRLS Loss
-    loss_rel = generator_TPRLS_loss(disc_real_outputs, disc_outputs)
-    loss += loss_rel
-
-    return loss
 
 class HingeAdversarialLoss(nn.Module):
     """Module for calculating adversarial loss in GANs."""

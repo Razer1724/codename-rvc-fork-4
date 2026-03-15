@@ -4,6 +4,7 @@ import signal
 import datetime
 import glob
 import itertools
+from itertools import islice
 import json
 import math
 import re
@@ -71,10 +72,8 @@ from utils import (
 from losses import (
     discriminator_loss,
     generator_loss,
-    discriminator_loss_v2,
-    generator_loss_v2,
-    discriminator_prls_loss,
-    generator_prls_loss,
+    discriminator_tprls_loss,
+    generator_tprls_loss,
     HingeAdversarialLoss,
     feature_loss,
     kl_loss,
@@ -170,6 +169,7 @@ pretrain_preview_interval = 100 # Measured in steps.
 override_pretrain_lr = False
 force_from_scratch = False
 new_pretrain_lr = 5e-5 # If you changed it, it needs to be re-adjusted to the most recent lr ~ anytime you resume!
+strict_load = True # Whether to be strict in loading ckpts for resuming
 
 clip_grad_norm_override = False
 clip_grad_norm_override_value_g = 100
@@ -179,7 +179,6 @@ clip_grad_norm_override_value_d = 100
 use_trajectory = False
 use_sid_swap = False
 custom_sid = 1
-#adversarial_loss = "prls"
 
 ##################################################################
 
@@ -201,7 +200,7 @@ class NullDiscriminator(nn.Module):
         return [ones], [zeros], fake_fmap, fake_fmap
 
 def univhd_project_gamma(net_d, vocoder, rank, global_step):
-    if vocoder != "ALPEX-GAN":
+    if vocoder != "APEX-GAN":
         return
     disc = net_d.module if hasattr(net_d, "module") else net_d
     with torch.no_grad():
@@ -321,21 +320,15 @@ def get_d_model(config, vocoder, use_checkpointing):
             use_checkpointing=use_checkpointing,
             **dict(config.mrd)
         )
-    elif vocoder == "ALPEX-GAN":
-         # MPD + MSD + MRD + UnivHD ( trials for univhd integration. )
-        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_UnivHD_Combined
-        return MPD_MSD_MRD_UnivHD_Combined(
+    elif vocoder == "APEX-GAN":
+        from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_UnivHD_Combined
+        # CoMBD + SBD + UnivHD ( unified )
+        return CoMBD_SBD_UnivHD_Combined(
             sample_rate=config.data.sample_rate,
+            segment_size_samples=config.train.segment_size,
             use_spectral_norm=config.model.use_spectral_norm,
             use_checkpointing=use_checkpointing,
-            **dict(config.mrd)
         )
-        # from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
-        # return MPD_MSD_MRD_Combined(
-            # config.model.use_spectral_norm,
-            # use_checkpointing=use_checkpointing,
-            # **dict(config.mrd)
-        # )
     elif vocoder == "RefineGAN":
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined_RefineGan
         # Trimmed MPD + MSD + MRD ( unified )
@@ -504,8 +497,8 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
 
             # Load the model and optim states
-            _, _, _, epoch_str, gradscaler_dict = load_checkpoint(g_checkpoint_path, net_g, optim_g)
-            _, _, _, epoch_str, _ = load_checkpoint(d_checkpoint_path, net_d, optim_d)
+            _, _, _, epoch_str, gradscaler_dict = load_checkpoint(g_checkpoint_path, net_g, optim_g, strict_load)
+            _, _, _, epoch_str, _ = load_checkpoint(d_checkpoint_path, net_d, optim_d, strict_load)
 
             if override_pretrain_lr:
                 new_lr_for_pretrain = new_pretrain_lr
@@ -1026,7 +1019,16 @@ def training_loop(
     net_g.train()
     net_d.train()
 
-    data_iterator = enumerate(train_loader)
+    # Partial resume aligning
+    current_epoch_start_step = (epoch - 1) * len(train_loader)
+    start_batch_idx = global_step - current_epoch_start_step
+    start_batch_idx = max(0, start_batch_idx)
+
+    if start_batch_idx > 0:
+        train_loader.batch_sampler.start_index = start_batch_idx
+
+    remaining_batches = len(train_loader) - start_batch_idx
+    data_iterator = islice(enumerate(train_loader), remaining_batches)
 
     epoch_recorder = EpochRecorder()
 
@@ -1054,18 +1056,12 @@ def training_loop(
 
     use_amp = config.train.fp16_run and device.type == "cuda"
 
-    # Partial resume aligning
-    current_epoch_start_step = (epoch - 1) * len(train_loader)
-    start_batch_idx = global_step - current_epoch_start_step
-    start_batch_idx = max(0, start_batch_idx)
-    
-    #with tqdm(total=len(train_loader), leave=False) as pbar:
     with tqdm(total=len(train_loader), leave=False, initial=start_batch_idx) as pbar:
         for batch_idx, info in data_iterator:
 
-            # Catch up with previously processed steps if resuming from partial ckpts
-            if batch_idx < start_batch_idx:
-                continue
+            # # Catch up with previously processed steps if resuming from partial ckpts
+            # if batch_idx < start_batch_idx:
+                # continue
 
             global_step += 1
             if not from_scratch:
@@ -1104,6 +1100,10 @@ def training_loop(
                 # Generator unpacking:
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (mag, _) = (model_output)
+                elif vocoder == "APEX-GAN":
+                    # y_hat_list = list of [coarse, mid, full] intermediates.
+                    y_hat_list, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q) = (model_output)
+                    y_hat = y_hat_list[-1] # final full-res waveform
                 else:
                     y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q) = (model_output)
 
@@ -1120,19 +1120,21 @@ def training_loop(
 
             # Discriminator forward pass:
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
+                if vocoder == "APEX-GAN":
+                    y_hat_d = [o.detach() for o in y_hat_list]
+                else:
+                    y_hat_d = y_hat.detach()
+                y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat_d)
 
             with autocast(device_type="cuda", enabled=False):
                 # Compute discriminator loss:
                 if adversarial_loss == "lsgan":
                     loss_disc = discriminator_loss(y_d_hat_r, y_d_hat_g)
                 elif adversarial_loss == "tprls":
-                    loss_disc = discriminator_loss_v2(y_d_hat_r, y_d_hat_g)
+                    loss_disc = discriminator_tprls_loss(y_d_hat_r, y_d_hat_g)
                 elif adversarial_loss == "hinge":
                     loss_fake, loss_real = fn_hinge_loss(y_d_hat_g, y_d_hat_r)
                     loss_disc = loss_fake + loss_real
-                elif adversarial_loss == "prls":
-                    loss_disc = discriminator_prls_loss(y_d_hat_r, y_d_hat_g)
 
 
             # Discriminator backward and update:
@@ -1152,7 +1154,10 @@ def training_loop(
 
             # Run discriminator on generated output
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
-                _, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
+                if vocoder == "APEX-GAN":
+                    _, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat_list)
+                else:
+                    _, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
 
             # Compute generator losses:
             with autocast(device_type="cuda", enabled=False):
@@ -1175,11 +1180,9 @@ def training_loop(
                     loss_adv = generator_loss(y_d_hat_g)
                 elif adversarial_loss == "tprls":
                     y_d_hat_r_detached = [i.detach() for i in y_d_hat_r]
-                    loss_adv = generator_loss_v2(y_d_hat_g, y_d_hat_r_detached)
+                    loss_adv = generator_tprls_loss(y_d_hat_r_detached, y_d_hat_g)
                 elif adversarial_loss == "hinge":
                     loss_adv = fn_hinge_loss(y_d_hat_g)
-                elif adversarial_loss == "prls":
-                    loss_adv = generator_prls_loss(y_d_hat_g, y_d_hat_r)
 
                 # Kl annealing handler
                 if use_kl_annealing:

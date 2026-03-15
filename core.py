@@ -436,7 +436,7 @@ def run_preprocess_script(
     clean_strength: float,
     chunk_len: float,
     overlap_len: float,
-    normalization_mode: str = "post_peak",
+    normalization_mode: str = "post_rms",
     loading_resampling: str = "librosa",
     use_smart_cutter: bool = False,
     dataset_format: str = "WAV"
@@ -1902,8 +1902,8 @@ def parse_arguments():
         "--normalization_mode",
         type=str,
         help="Normalization mode.",
-        choices=["none", "post_peak"],
-        default="post_peak",
+        choices=["none", "post_peak", "post_peak_rvc", "post_rms"],
+        default="post_rms",
     )
     preprocess_parser.add_argument(
         "--loading_resampling",
@@ -1965,7 +1965,7 @@ def parse_arguments():
         choices=[
             "hifi_refine", # NSF-HiFi-GAN and RefineGAN ~ They share the same base config
             "ringformer",
-            "alpex_gan",
+            "apex_gan",
         ],
         default="hifi_refine",
     )
@@ -2007,7 +2007,7 @@ def parse_arguments():
         "--vocoder",
         type=str,
         help="Vocoder name",
-        choices=["HiFi-GAN", "ALPEX-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"],
+        choices=["HiFi-GAN", "APEX-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"],
         default="HiFi-GAN",
     )
     train_parser.add_argument(

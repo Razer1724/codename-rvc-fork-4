@@ -450,8 +450,8 @@ def train_tab():
                 normalization_mode = gr.Radio(
                     label="Loudness Normalization",
                     info=NORMALIZATION_INFO,
-                    choices=["none", "post_peak"],
-                    value="post_peak",
+                    choices=["none", "post_peak", "post_peak_rvc", "post_rms"],
+                    value="post_rms",
                     interactive=True,
                     visible=True,
                     scale=0.6,
@@ -839,29 +839,29 @@ def train_tab():
                     key='custom_pretrained'
                 )
                 with gr.Column(visible=False) as pretrained_custom_settings:
-                    with gr.Accordion("Pretrained Custom Settings"):
-                        upload_pretrained = gr.File(
-                            label="Upload Pretrained Model",
-                            type="filepath",
-                            interactive=True,
-                        )
-                        refresh_custom_pretaineds_button = gr.Button("Refresh Custom Pretraineds")
-                        g_pretrained_path = gr.Dropdown(
-                            label="Custom Pretrained G",
-                            info="Select the custom pretrained model for the generator.",
-                            choices=sorted(pretraineds_list_g),
-                            interactive=True,
-                            allow_custom_value=True,
-                            key='g_pretrained_path'
-                        )
-                        d_pretrained_path = gr.Dropdown(
-                            label="Custom Pretrained D",
-                            info="Select the custom pretrained model for the discriminator.",
-                            choices=sorted(pretraineds_list_d),
-                            interactive=True,
-                            allow_custom_value=True,
-                            key='d_pretrained_path'
-                        )
+                        with gr.Accordion("Pretrained Custom Settings"):
+                            upload_pretrained = gr.File(
+                                label="Upload Pretrained Model",
+                                type="filepath",
+                                interactive=True,
+                            )
+                            refresh_custom_pretaineds_button = gr.Button("Refresh Custom Pretraineds")
+                            g_pretrained_path = gr.Dropdown(
+                                label="Custom Pretrained G",
+                                info="Select the custom pretrained model for the generator.",
+                                choices=sorted(pretraineds_list_g),
+                                interactive=True,
+                                allow_custom_value=True,
+                                key='g_pretrained_path'
+                            )
+                            d_pretrained_path = gr.Dropdown(
+                                label="Custom Pretrained D",
+                                info="Select the custom pretrained model for the discriminator.",
+                                choices=sorted(pretraineds_list_d),
+                                interactive=True,
+                                allow_custom_value=True,
+                                key='d_pretrained_path'
+                            )
                 multiple_gpu = gr.Checkbox(
                     label="GPU Settings",
                     info=(
@@ -1082,27 +1082,10 @@ def train_tab():
                     )
 
             def toggle_visible(checkbox):
-                return {"visible": checkbox or "hidden", "__type__": "update"}
-
-            def toggle_visible_grad_clip(field):
-                return [{"visible": field or "hidden", "__type__": "update"} for _ in range(5)]
+                return {"visible": True if checkbox else "hidden", "__type__": "update"}
 
             def toggle_visible_gamma(lr_scheduler):
-                if lr_scheduler in ["exp decay step", "exp decay epoch"]:
-                    return {"visible": True, "__type__": "update"}
-                return {"visible": "hidden", "__type__": "update"}
-
-            def toggle_pretrained(pretrained, custom_pretrained):
-                if custom_pretrained == False:
-                    return {"visible": pretrained, "__type__": "update"}, {
-                        "visible": "hidden",
-                        "__type__": "update",
-                    }
-                else:
-                    return {"visible": pretrained, "__type__": "update"}, {
-                        "visible": pretrained,
-                        "__type__": "update",
-                    }
+                return {"visible": lr_scheduler in ["exp decay step", "exp decay epoch"], "__type__": "update"}
 
             def download_prerequisites():
                     gr.Info(
@@ -1118,9 +1101,7 @@ def train_tab():
                     )
 
             def toggle_visible_embedder_custom(embedder_model):
-                if embedder_model == "custom":
-                    return {"visible": True, "__type__": "update"}
-                return {"visible": "hidden", "__type__": "update"}
+                return {"visible": embedder_model == "custom", "__type__": "update"}
 
             def toggle_architecture(architecture, vocoder_arch):
                 if architecture == "Fork/Applio":
@@ -1139,7 +1120,7 @@ def train_tab():
                         vocoder_arch_value,
                     )
                 elif architecture == "Fork":
-                    vocoder_arch_value = "ALPEX-GAN"
+                    vocoder_arch_value = "APEX-GAN"
                     return (
                         {
                             "choices": ["24000", "32000", "40000", "48000"],
@@ -1147,10 +1128,10 @@ def train_tab():
                             "value": "48000",
                         },
                         {
-                            "choices": ["RingFormer_v1", "RingFormer_v2", "ALPEX-GAN"],
+                            "choices": ["RingFormer_v1", "RingFormer_v2", "APEX-GAN"],
                             "__type__": "update",
                             "interactive": True,
-                            "value": "ALPEX-GAN",
+                            "value": "APEX-GAN",
                         },
                         vocoder_arch_value,
                     )
@@ -1191,8 +1172,8 @@ def train_tab():
                         },
                         vocoder_arch_value,
                     )
-                elif architecture == "Fork" and vocoder == "ALPEX-GAN":
-                    vocoder_arch_value = "alpex_gan"
+                elif architecture == "Fork" and vocoder == "APEX-GAN":
+                    vocoder_arch_value = "apex_gan"
                     return (
                         {
                             "choices": ["24000", "32000", "40000", "48000"],
@@ -1205,7 +1186,9 @@ def train_tab():
                     return gr.skip()
 
             def update_noise_reduce_slider_visibility(noise_reduction):
-                return gr.update(visible=noise_reduction or "hidden")
+                if noise_reduction:
+                    return {"visible": True, "__type__": "update"}
+                return {"visible": "hidden", "__type__": "update"}
 
             saved_components.extend([
                 # Model settings
@@ -1232,7 +1215,7 @@ def train_tab():
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
-                grad_clip_value_d_release, index_algorithm, use_kl_annealing
+                grad_clip_value_d_release, index_algorithm
             ])
 
             def save_training_preset(inputs):
@@ -1324,7 +1307,10 @@ def train_tab():
                 fn=refresh_embedders_folders, inputs=[], outputs=[embedder_model_custom]
             )
             pretrained.change(
-                fn=toggle_pretrained,
+                fn=lambda pretrained_val, custom_val: (
+                    {"visible": bool(pretrained_val), "__type__": "update"},
+                    {"visible": bool(pretrained_val and custom_val), "__type__": "update"},
+                ),
                 inputs=[pretrained, custom_pretrained],
                 outputs=[custom_pretrained, pretrained_custom_settings],
             )
@@ -1359,12 +1345,12 @@ def train_tab():
                 outputs=[custom_lr_settings],
             )
             use_kl_annealing.change(
-                fn=toggle_visible,
+                fn=lambda v: {"visible": True, "__type__": "update"} if v else {"visible": "hidden", "__type__": "update"},
                 inputs=[use_kl_annealing],
                 outputs=[kl_annealing_cycle_duration]
             )
             grad_clip_scheduling.change(
-                fn=toggle_visible_grad_clip,
+                fn=lambda v: [{"visible": True, "__type__": "update"} for _ in range(5)] if v else [{"visible": "hidden", "__type__": "update"} for _ in range(5)],
                 inputs=[grad_clip_scheduling],
                 outputs=[grad_clip_steps_duration, grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release, grad_clip_value_d_release]
             )

@@ -10,15 +10,16 @@ VOCODER_INFO = textwrap.dedent("""\
     
     **RefineGAN:**
     - **Arch overview:** ParallelResBlocks + AdaIN + Hn-NSF
-    - **COMPATIBILITY:** This Fork or Applio ( As for rt-vc, vonovox beta supports it. )
+    - **COMPATIBILITY:** Offline: This Fork or Applio, Streaming: not 100% sure.
     
     **RingFormer:**
     - **Arch overview:** A hybrid Resblocks+Conformer-Based Vocoder + RingAttention + Hn-NSF.
-    - **COMPATIBILITY:** This Fork ( As for rt-vc, 'Vonovox' supports it. )
+    - **COMPATIBILITY:** Offline: This Fork. Streaming: None.
+    ⚠ This architecture is under a big question mark atm. ⚠
     
-    **ALPEX-GAN:**
-    - **Arch overview:** ResBlocks + FGSS/Cyc-noise + Laplacian pyramid downsampling & injection.
-    - **COMPATIBILITY:** This Fork ( No rt-vc clients support it atm. )
+    **APEX-GAN:**
+    - **Arch overview:** Snake ResBlocks + GeoSaw (FGSS) excitation + per-stage antialiased injection.
+    - **COMPATIBILITY:** Offline: This Fork. Streaming: None atm.
     
     **NOTES:**
     **( Offline = Static inference/Covers, Streaming = Real-Time voice changers )**
@@ -30,20 +31,33 @@ VOCODER_INFO = textwrap.dedent("""\
 DATASET_TRUNCATION_INFO = textwrap.dedent("""\
 <br/>
 
-### **SmartCutter / Truncated-Audio approach:**
+### **SmartCutter / Truncated-Audio approach ( Most stable results ):**
 
 #### Requirements:
 - Your dataset is a **" fused dataset "** type ( Means, you concatenated / joined up all smaller samples / chunks into 1 continuous audio file )
-- You keep "SmartCutter" enabled ( My machine-learning solution to 'silence truncation'. )
-<br/> ⚠ ( **or** you made sure your audio is silence-truncated. )
+- A. "SmartCutter" enabled ( My machine-learning solution for silence-truncation. )
+- B. Dataset being **silence-truncated beforehand.**
+- Audio normalization method: **" post_rms "** or **" post_peak "** ~ Both will work fine but in rare cases, rms one will be better.
+- Audio cutting: " Simple "
+<br/> ⚠ ( If SmartCutter doesn't click with ur dataset, please go for option "B" ~ Audacity is great for that. )
 
 <br/>
 
-### **Otherwise you likely should go with:**
+### **Universal-ish approach:**
+
+#### Requirements:
+- "SmartCutter" disabled.
+- Dataset not too crazy with noisy or silent spaces / gaps ( Else perform a soft silence-truncation to get it somewhere reasonable. )
+- " post_rms " as audio normalization method.
+- Audio cutting: " Simple "
+
+<br/>
+
+### **Lazy / Low effort approach:**
 
 - SmartCutter:  Set it to "Disabled"
-- Audio cutting:  "Automatic"
-<br/> ⚠ ( Yet I'd still recommend to go with approach the first approach. It provides ***much better and more consistent*** results.
+- Audio cutting:  " Automatic "
+<br/> ⚠ ( Yet I'd still recommend to go with approach the 1st or 2nd approach. They provide ***much better and more consistent*** results.
 
 <br/>
 
@@ -102,17 +116,21 @@ Created especially with this fork in mind.
 NORMALIZATION_INFO = textwrap.dedent("""\
 - **none:** Disabled
 ( Select this if the files are already normalized. )
-- **post_peak:** Peak Post-Normalization
-( Peak [ * 0.95] norm of each sliced segment. )
+- **post_peak:** Peak post-norm,
+( Peak [ * 0.95] norm of each slice. )
+- **post_peak_rvc:** Peak post-norm with alpha blend
+( Peak [ max amp * alpha] norm of each slice. )
+- **post_rms:** RMS-based post-norm
+( RMS [-18 dBFS target] norm of each slice. )
 """)
 
 
 AUDIO_FILE_SLICING_INFO = textwrap.dedent("""\
 **Audio file slicing-method selection:**
 - **Skip:** if the files are already pre-sliced and properly normalized.
-- **Simple:** If your dataset is already silence-truncated.
+- **Simple:** If your dataset is already silence-truncated or well behaving in terms of spaces / gaps.
 - **Automatic:** for automatic silence detection and slicing around it.
-**It is advised to go with 'SmartCutter' approach.**
+**It is advised to go for SmartCutter or Universal approach.**
 **( PS. Automatic is pretty crap. I advise against it unless your set's clean and you can't bother truncating it. )**
 """)
 

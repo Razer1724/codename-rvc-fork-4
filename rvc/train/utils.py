@@ -49,20 +49,24 @@ def replace_keys_in_dict(d, old_key_part, new_key_part):
     return updated_dict
 
 
-def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
+def load_checkpoint(checkpoint_path, model, optimizer=None, strict_load=True):
     assert os.path.isfile(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
     checkpoint_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     model_state = model.module if hasattr(model, "module") else model
-    model_state.load_state_dict(checkpoint_dict["model"], strict=True)
+    model_state.load_state_dict(checkpoint_dict["model"], strict=strict_load)
 
-    if optimizer and load_opt == 1:
+    if optimizer:
         opt_state = checkpoint_dict.get("optimizer")
         if opt_state:
             optimizer.load_state_dict(opt_state)
             print("Loaded optimizer state.")
         else:
-            raise ValueError(f"[ERROR] Missing optimizer state...")
+            if strict_load:
+                raise ValueError(f"[ERROR] Missing optimizer state...")
+            else:
+                print("[WARNING] No optimizer state found in checkpoint, starting optimizer fresh.")
+
 
     print(f"Loaded checkpoint '{checkpoint_path}' (iteration {checkpoint_dict['iteration']})")
     return (

@@ -128,7 +128,7 @@ def pcph_geosaw_fwd(phase, n_harms, r=0.95, eps=1e-6):
     out = torch.empty_like(phase)
 
     r_val = -1.0 if r is None else float(r)
-    grid  = lambda meta: (batch * channels, triton.cdiv(length, meta['BLOCK_SIZE']))
+    grid = lambda meta: (batch * channels, triton.cdiv(length, meta['BLOCK_SIZE']))
 
     _pcph_geosaw_kernel[grid](
         phase, n_harms, out,
