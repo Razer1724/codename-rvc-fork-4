@@ -285,7 +285,6 @@ class VoiceConverter:
                 .strip("\n")
                 .strip('"')
                 .strip()
-                .replace("trained", "added")
                 if index_path and os.path.exists(index_path) else ""
             )
 

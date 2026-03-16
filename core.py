@@ -1867,8 +1867,8 @@ def parse_arguments():
         "--process_effects",
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
-        help="Disable all filters during preprocessing.",
-        default=False,
+        help="Enable high-pass filtering during preprocessing.",
+        default=True,
     )
     preprocess_parser.add_argument(
         "--noise_reduction",
