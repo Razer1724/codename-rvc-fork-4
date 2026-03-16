@@ -436,9 +436,10 @@ def run_preprocess_script(
     clean_strength: float,
     chunk_len: float,
     overlap_len: float,
-    normalization_mode: str = "post_peak",
+    normalization_mode: str = "post_rms",
     loading_resampling: str = "librosa",
-    use_smart_cutter: bool = False
+    use_smart_cutter: bool = False,
+    dataset_format: str = "WAV"
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -459,7 +460,8 @@ def run_preprocess_script(
                 overlap_len,
                 normalization_mode,
                 loading_resampling,
-                use_smart_cutter
+                use_smart_cutter,
+                dataset_format
             ],
         ),
     ]
@@ -536,12 +538,17 @@ def run_train_script(
     spectral_loss: str = "L1 Mel Loss",
     lr_scheduler: str = "exp decay step",
     exp_decay_gamma: str = "0.999875",
-    use_validation: bool = True,
     use_kl_annealing: bool = False,
     kl_annealing_cycle_duration: int = 3,
     vits2_mode: bool = False,
     rolling_loss_steps: int = 50,
     use_tstp: bool = False,
+    grad_clip_scheduling: bool = False,
+    grad_clip_steps_duration: int = 0,
+    grad_clip_value_g_cap: int = 0,
+    grad_clip_value_d_cap: int = 0,
+    grad_clip_value_g_release: int = 0,
+    grad_clip_value_d_release: int = 0,
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
@@ -553,15 +560,10 @@ def run_train_script(
         from rvc.lib.tools.pretrained_selector import pretrained_selector
 
         if custom_pretrained == False:
-            pg, pd = pretrained_selector(
-                str(vocoder), int(sample_rate)
-            )
+            pg, pd = pretrained_selector(str(vocoder), int(sample_rate))
         else:
-            if g_pretrained_path is None or d_pretrained_path is None:
-                raise ValueError(
-                    "Please provide the path to the pretrained G and D models."
-                )
-            pg, pd = g_pretrained_path, d_pretrained_path
+            pg = g_pretrained_path if g_pretrained_path is not None else ""
+            pd = d_pretrained_path if d_pretrained_path is not None else ""
     else:
         pg, pd = "", ""
 
@@ -596,12 +598,17 @@ def run_train_script(
                 spectral_loss,
                 lr_scheduler,
                 exp_decay_gamma,
-                use_validation,
                 use_kl_annealing,
                 kl_annealing_cycle_duration,
                 vits2_mode,
                 rolling_loss_steps,
                 use_tstp,
+                grad_clip_scheduling,
+                grad_clip_steps_duration,
+                grad_clip_value_g_cap,
+                grad_clip_value_d_cap,
+                grad_clip_value_g_release,
+                grad_clip_value_d_release,
                 use_custom_lr,
                 custom_lr_g,
                 custom_lr_d
@@ -1895,8 +1902,8 @@ def parse_arguments():
         "--normalization_mode",
         type=str,
         help="Normalization mode.",
-        choices=["none", "post_peak"],
-        default="post_peak",
+        choices=["none", "post_peak", "post_peak_rvc", "post_rms"],
+        default="post_rms",
     )
     preprocess_parser.add_argument(
         "--loading_resampling",
@@ -1958,7 +1965,7 @@ def parse_arguments():
         choices=[
             "hifi_refine", # NSF-HiFi-GAN and RefineGAN ~ They share the same base config
             "ringformer",
-            "alpex_gan",
+            "apex_gan",
         ],
         default="hifi_refine",
     )
@@ -2000,7 +2007,7 @@ def parse_arguments():
         "--vocoder",
         type=str,
         help="Vocoder name",
-        choices=["HiFi-GAN", "ALPEX-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"],
+        choices=["HiFi-GAN", "APEX-GAN", "RefineGAN", "RingFormer_v1", "RingFormer_v2"],
         default="HiFi-GAN",
     )
     train_parser.add_argument(
@@ -2014,7 +2021,7 @@ def parse_arguments():
         "--optimizer",
         type=str,
         help="Choose an optimizer used in training.",
-        choices=["AdamW BF16", "AdamW", "AdamSPD", "RAdam", "Ranger21", "DiffGrad", "Prodigy"],
+        choices=["AdamW", "AdamSPD", "RAdam", "Ranger21", "DiffGrad"],
         default="AdamW",
     )
     train_parser.add_argument(
@@ -2176,13 +2183,6 @@ def parse_arguments():
         default="0.999875",
     )
     train_parser.add_argument(
-        "--use_validation",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Whether to use hold-out validation",
-        default=False,
-    )
-    train_parser.add_argument(
         "--use_kl_annealing",
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
@@ -2214,6 +2214,43 @@ def parse_arguments():
         choices=[True, False],
         help="Whether to use Two-Stage Training Protocol ( Freezes encoders, flow, spk emb and speeds up the lr decay. )",
         default=False,
+    )
+    train_parser.add_argument(
+        "--grad_clip_scheduling",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Whether you wanna enable grads clipping scheduling",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--grad_clip_steps_duration",
+        type=int,
+        help="Duration ( in steps ) for grads clipping",
+        default=0,
+    )
+    train_parser.add_argument(
+        "--grad_clip_value_g_cap",
+        type=int,
+        help="Specify clipping value for Generator's clip_grad_norm",
+        default=0,
+    )
+    train_parser.add_argument(
+        "--grad_clip_value_d_cap",
+        type=int,
+        help="Specify clipping value for Discriminator's clip_grad_norm",
+        default=0,
+    )
+    train_parser.add_argument(
+        "--grad_clip_value_g_release",
+        type=int,
+        help="Specify what kind of clipping value you want after the scheduling, for G. Set to 0 to leave unconstrained.",
+        default=0,
+    )
+    train_parser.add_argument(
+        "--grad_clip_value_d_release",
+        type=int,
+        help="Specify what kind of clipping value you want after the scheduling, for D. Set to 0 to leave unconstrained.",
+        default=0,
     )
     train_parser.add_argument(
         "--use_custom_lr",
@@ -2558,10 +2595,15 @@ def main():
                 spectral_loss=args.spectral_loss,
                 lr_scheduler=args.lr_scheduler,
                 exp_decay_gamma=args.exp_decay_gamma,
-                use_validation=args.use_validation,
                 vits2_mode=args.vits2_mode,
                 rolling_loss_steps=args.rolling_loss_steps,
                 use_tstp=args.use_tstp,
+                grad_clip_scheduling=args.grad_clip_scheduling,
+                grad_clip_steps_duration=args.grad_clip_steps_duration,
+                grad_clip_value_g_cap=args.grad_clip_value_g_cap,
+                grad_clip_value_d_cap=args.grad_clip_value_d_cap,
+                grad_clip_value_g_release=args.grad_clip_value_g_release,
+                grad_clip_value_d_release=args.grad_clip_value_d_release,
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,

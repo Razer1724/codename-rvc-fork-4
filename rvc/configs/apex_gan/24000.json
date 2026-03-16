@@ -7,20 +7,19 @@
             0.99
         ],
         "eps": 1e-09,
-        "bf16_run": false,
         "fp16_run": true,
         "lr_decay": 0.999875,
-        "segment_size": 17280,
+        "segment_size": 10080,
         "c_mel": 45,
         "c_kl": 1.0
     },
     "data": {
         "max_wav_value": 32768.0,
-        "sample_rate": 48000,
-        "filter_length": 2048,
-        "hop_length": 480,
-        "win_length": 2048,
-        "n_mel_channels": 128,
+        "sample_rate": 24000,
+        "filter_length": 1024,
+        "hop_length": 240,
+        "win_length": 1024,
+        "n_mel_channels": 64,
         "mel_fmin": 0.0,
         "mel_fmax": null
     },
@@ -57,15 +56,15 @@
             ]
         ],
         "upsample_rates": [
-            12,
             10,
+            6,
             2,
             2
         ],
         "upsample_initial_channel": 512,
         "upsample_kernel_sizes": [
-            24,
             20,
+            12,
             4,
             4
         ],

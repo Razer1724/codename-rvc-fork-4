@@ -90,156 +90,68 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
 
     return loss
 
-def kl_loss_clamped(z_p, logs_q, m_p, logs_p, z_mask):
+
+def discriminator_tprls_loss(disc_real_outputs, disc_generated_outputs):
     """
-    Compute the Kullback-Leibler divergence loss.
-    Variant with non-negativity clamp.
-
-    Args:
-        z_p (torch.Tensor): Sampled latent variable transformed by the flow [b, h, t_t].
-        logs_q (torch.Tensor): Log variance of the posterior distribution q [b, h, t_t].
-        m_p (torch.Tensor): Mean of the prior distribution p [b, h, t_t].
-        logs_p (torch.Tensor): Log variance of the prior distribution p [b, h, t_t].
-        z_mask (torch.Tensor): Mask for the latent variables [b, h, t_t].
+    TPRLS Discriminator Loss
     """
-    kl = logs_p - logs_q - 0.5 + 0.5 * ((z_p - m_p) ** 2) * torch.exp(-2 * logs_p)
-    kl = (kl * z_mask).sum()
-    loss = kl / z_mask.sum()
-    loss = torch.clamp(loss, min=0.0)
-
-    return loss
-
-
-def discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
     loss = 0
     tau = 0.04
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         dr = dr.float()
         dg = dg.float()
-
-        # Median centering
-        m_DG = torch.median((dr - dg))
-
-        # Relative difference
-        # We only penalize when the Real sample is NOT sufficiently better than Fake
-        # Condition: Real < Fake + Margin
+        m_DG = torch.median(dr - dg)
         diff = (dr - dg) - m_DG
         mask = dr < (dg + m_DG)
-
-        # Calculate Squared Error on the masked (hard) examples
-        # We use empty-safe mean calculation
-        masked_diff = diff[mask]
-        if masked_diff.numel() > 0:
-            L_rel = torch.mean(masked_diff ** 2)
-        else:
-            L_rel = torch.tensor(0.0, device=dr.device)
-
-        # Truncate the loss (clamp)
+        masked = diff[mask]
+        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dr.device)
         loss += tau - F.relu(tau - L_rel)
-
     return loss
 
 
-def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
+def generator_tprls_loss(disc_real_outputs, disc_generated_outputs):
+    """
+    TPRLS Generator Loss
+    """
     loss = 0
     tau = 0.04
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         dr = dr.float()
         dg = dg.float()
-        
-        # Median centering (Fake - Real)
-        diff = dg - dr 
+        diff = dg - dr
         m_DG = torch.median(diff)
-
-        # Relative difference
-        # Generator wants Fake > Real. 
-        # We penalize when Fake is NOT sufficiently better than Real
-        # Condition: Fake < Real + Margin
-        rel_diff = diff - m_DG
+        rel = diff - m_DG
         mask = diff < m_DG
-
-        masked_diff = rel_diff[mask]
-        if masked_diff.numel() > 0:
-            L_rel = torch.mean(masked_diff ** 2)
-        else:
-            L_rel = torch.tensor(0.0, device=dg.device)
-
-        # Truncate the loss (clamp)
+        masked = rel[mask]
+        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dg.device)
         loss += tau - F.relu(tau - L_rel)
-
     return loss
 
-def discriminator_loss_v2(disc_real_outputs, disc_generated_outputs):
-    """
-    Compute the discriminator loss for real and generated outputs.
-    """
-    loss = 0
-
-    # LSGAN Loss
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        r_loss = torch.mean((1 - dr.float()) ** 2)
-        g_loss = torch.mean(dg.float() ** 2)
-        loss += r_loss + g_loss
-
-    # TPRLS Loss
-    loss_rel = discriminator_TPRLS_loss(disc_real_outputs, disc_generated_outputs)
-    loss += loss_rel
-
-    return loss
-
-
-def generator_loss_v2(disc_outputs, disc_real_outputs):
-    """
-    LSGAN Generator Loss + TPRLS
-    """
-    loss = 0
-
-    # Existing LSGAN Loss
-    for dg in disc_outputs:
-        l = torch.mean((1 - dg.float()) ** 2)
-        loss += l
-
-    # TPRLS Loss
-    loss_rel = generator_TPRLS_loss(disc_real_outputs, disc_outputs)
-    loss += loss_rel
-
-    return loss
 
 class HingeAdversarialLoss(nn.Module):
     """Module for calculating adversarial loss in GANs."""
 
-    def __init__(self,) -> None:
+    def __init__(self, clamped_generator: bool = True) -> None:
         """
         Hinge adversarial loss.
+
+        Args:
+            clamped_generator (bool): If True, uses clamped generator loss max{0, 1 - D(fake)} If False, uses unclamped -D(fake).mean().
         """
         super().__init__()
 
-        self.adv_criterion = self._hinge_adv_loss
+        self.adv_criterion = self._hinge_adv_loss_clamped if clamped_generator else self._hinge_adv_loss_unclamped
         self.fake_criterion = self._hinge_fake_loss
         self.real_criterion = self._hinge_real_loss
 
     def forward(
         self, p_fakes: List[Tensor], p_reals: Optional[List[Tensor]] = None
     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
-        """
-        Calculate adversarial loss for both generator and discriminator.
-
-        Args:
-            p_fakes (List[Tensor]): List of discriminator outputs from the generated data.
-            p_reals (List[Tensor], optional): List of discriminator outputs from real data.
-                If not provided, only generator loss is computed (default: None).
-
-        Returns:
-            Tensor: Generator adversarial loss.
-            If p_reals is provided:
-                Tuple[Tensor, Tensor]: Fake and real discriminator loss values.
-        """
         # Generator adversarial loss
         if p_reals is None:
             adv_loss = 0.0
             for p_fake in p_fakes:
                 adv_loss += self.adv_criterion(p_fake)
-
             return adv_loss
 
         # Discriminator adversarial loss
@@ -248,12 +160,14 @@ class HingeAdversarialLoss(nn.Module):
             for p_fake, p_real in zip(p_fakes, p_reals):
                 fake_loss += self.fake_criterion(p_fake)
                 real_loss += self.real_criterion(p_real)
-
             return fake_loss, real_loss
 
+    def _hinge_adv_loss_clamped(self, x: Tensor) -> Tensor:
+        """Clamped hinge loss for generator: max{0, 1 - D(fake)}. Wavehax-aligned."""
+        return -torch.mean(torch.min(x - 1, x.new_zeros(x.size())))
 
-    def _hinge_adv_loss(self, x: Tensor) -> Tensor:
-        """Calculate hinge loss for generator."""
+    def _hinge_adv_loss_unclamped(self, x: Tensor) -> Tensor:
+        """Unclamped hinge loss for generator: -D(fake).mean()."""
         return -x.mean()
 
     def _hinge_real_loss(self, x: Tensor) -> Tensor:

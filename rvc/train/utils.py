@@ -49,18 +49,24 @@ def replace_keys_in_dict(d, old_key_part, new_key_part):
     return updated_dict
 
 
-def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
+def load_checkpoint(checkpoint_path, model, optimizer=None, strict_load=True):
     assert os.path.isfile(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
     checkpoint_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     model_state = model.module if hasattr(model, "module") else model
-    model_state.load_state_dict(checkpoint_dict["model"], strict=True)
+    model_state.load_state_dict(checkpoint_dict["model"], strict=strict_load)
 
-    if optimizer and load_opt == 1:
+    if optimizer:
         opt_state = checkpoint_dict.get("optimizer")
         if opt_state:
             optimizer.load_state_dict(opt_state)
             print("Loaded optimizer state.")
+        else:
+            if strict_load:
+                raise ValueError(f"[ERROR] Missing optimizer state...")
+            else:
+                print("[WARNING] No optimizer state found in checkpoint, starting optimizer fresh.")
+
 
     print(f"Loaded checkpoint '{checkpoint_path}' (iteration {checkpoint_dict['iteration']})")
     return (
@@ -145,7 +151,7 @@ def plot_spectrogram_to_numpy(spectrogram):
         plt.switch_backend("Agg")
         MATPLOTLIB_FLAG = True
 
-    fig, ax = plt.subplots(figsize=(10, 2))
+    fig, ax = plt.subplots(figsize=(10, 2.5))
     im = ax.imshow(spectrogram, aspect="auto", origin="lower", interpolation="none")
     plt.colorbar(im, ax=ax)
     plt.xlabel("Frames")
@@ -153,8 +159,9 @@ def plot_spectrogram_to_numpy(spectrogram):
     plt.tight_layout()
 
     fig.canvas.draw()
-    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    data = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+    data = data[:, :, :3]
     plt.close(fig)
     return data
 
@@ -345,7 +352,6 @@ def print_init_setup(
     use_warmup,
     config,
     optimizer_choice,
-    use_validation,
     lr_scheduler,
     exp_decay_gamma,
     use_kl_annealing,
@@ -359,16 +365,11 @@ def print_init_setup(
     if rank == 0:
 
         # Precision init msg:
-        if not (config.train.bf16_run or config.train.fp16_run):
+        if not config.train.fp16_run:
             if torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32:
                 print("    ██████  PRECISION: TF32")
             else:
                 print("    ██████  PRECISION: FP32")
-        elif config.train.bf16_run:
-            if torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32:
-                print("    ██████  PRECISION: TF32 / BF16 - AMP")
-            else:
-                print("    ██████  PRECISION: FP32 / BF16 - AMP")
         elif config.train.fp16_run:
             if torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32:
                 print("    ██████  PRECISION: TF32 / FP16 - AMP")
@@ -411,29 +412,28 @@ def print_init_setup(
         else:
             print("    ██████  Vits mode: vits-based (Default RVC)")
 
-        # Validation check:
-        print(f"    ██████  Using Validation: {use_validation}")
-
         # LR scheduler check:
         if lr_scheduler == "exp decay":
             print(f"    ██████  lr scheduler: exponential lr decay with gamma of: {exp_decay_gamma}")
         elif lr_scheduler == "cosine annealing":
             print(f"    ██████  lr scheduler: cosine annealing")
 
+        # Warmup
         if use_warmup:
             print(f"    ██████  Warmup Enabled for: {warmup_duration} epochs.")
 
+        # Kl annealing
         if use_kl_annealing:
             print(f"    ██████  KL loss annealing enabled with cycle duration of: {kl_annealing_cycle_duration} epochs.")
 
+        # Tstp
         if use_tstp:
             print(f"    ██████  Two-Stage Training Protocol: Enabled")
 
-def train_loader_safety(benchmark_mode, train_loader):
-    if not benchmark_mode:
-        if len(train_loader) < 3:
-            print("Not enough data present in the training set. Perhaps you didn't slice the audio files? ( Preprocessing step )")
-            os._exit(2333333)
+def train_loader_safety(train_loader):
+    if len(train_loader) < 3:
+        print("Not enough data present in the training set. Perhaps you didn't slice the audio files? ( Preprocessing step )")
+        os._exit(2333333)
 
 
 def verify_spk_dim(

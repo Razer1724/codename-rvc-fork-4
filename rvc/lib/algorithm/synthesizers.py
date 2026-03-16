@@ -37,8 +37,9 @@ class Synthesizer(torch.nn.Module):
         text_enc_hidden_dim: int = 768,
         vocoder: str = "HiFi-GAN",
         checkpointing: bool = False,
-        randomized: bool = True,
+        # Other
         vits2_mode: bool = False,
+        # RingFormer
         gen_istft_n_fft: int = 120,
         gen_istft_hop_size: int = 30,
         **kwargs,
@@ -47,7 +48,6 @@ class Synthesizer(torch.nn.Module):
         self.segment_size = segment_size
         self.use_f0 = use_f0
         self.vocoder = vocoder
-        self.randomized = randomized
         self.vits2_mode = vits2_mode
 
         if vits2_mode:
@@ -103,9 +103,9 @@ class Synthesizer(torch.nn.Module):
                     checkpointing=checkpointing,
                 )
                 print(f"    ██████  Vocoder: {vocoder}")
-            elif vocoder == "PCPH-GAN":
-                from rvc.lib.algorithm.generators import PCPH_GAN_Generator
-                self.dec = PCPH_GAN_Generator(
+            elif vocoder == "APEX-GAN":
+                from rvc.lib.algorithm.generators import APEX_GAN_Generator
+                self.dec = APEX_GAN_Generator(
                     inter_channels,
                     resblock_kernel_sizes,
                     resblock_dilation_sizes,
@@ -114,10 +114,8 @@ class Synthesizer(torch.nn.Module):
                     upsample_kernel_sizes,
                     gin_channels=gin_channels,
                     sr=sr,
-                    checkpointing=checkpointing,
-                    use_inplace=True,
                 )
-                print("    ██████  Vocoder: PCPH-GAN")
+                print("    ██████  Vocoder: APEX-GAN")
             else:  # vocoder == "HiFi-GAN"
                 from rvc.lib.algorithm.generators import HiFiGANNSFGenerator
                 self.dec = HiFiGANNSFGenerator(
@@ -133,7 +131,7 @@ class Synthesizer(torch.nn.Module):
                 )
                 print("    ██████  Vocoder: NSF-HiFi-GAN")
         else:
-            if vocoder in ["RefineGAN", "RingFormer_v1", "RingFormer_v2"]:
+            if vocoder in ["RefineGAN", "RingFormer_v1", "RingFormer_v2", "APEX-GAN"]:
                 print(f"{vocoder} does not support training without pitch guidance.")
                 self.dec = None
             else: # vocoder == "HiFi-GAN"
@@ -223,47 +221,40 @@ class Synthesizer(torch.nn.Module):
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
         if spec is not None:
-            if debug_shapes:
-                print(f"[DEBUG PRE-DECODER] spec_lengths shape: {spec_lengths}")
-                print(f"[DEBUG PRE-DECODER] spec shape: {spec.shape}")
-
             z, m_q, logs_q, spec_mask = self.enc_q(spec, spec_lengths, g=g)
-
-            if debug_shapes:
-                print(f"[DEBUG PRE-DECODER] z shape: {z.shape}")
-
             z_p = self.flow(z, spec_mask, g=g)
 
             if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                if self.randomized:
-                    z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
+                o, spec, phase = self.dec(z_slice, pitchf, g=g)
+
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
+
+            elif self.vocoder == "APEX-GAN":
+                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
+                o = self.dec(z_slice, pitchf, g=g, return_intermediates=True)
+
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+
+            elif self.vocoder == "RefineGAN":
+                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
+                o = self.dec(z_slice, pitchf, g=g)
+
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+
+            else: # For HiFi-Gan training
+                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+
+                if self.use_f0:
                     pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                    o, spec, phase = self.dec(z_slice, pitchf, g=g) # f0 output
-
-                    return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
+                    o = self.dec(z_slice, pitchf, g=g)
                 else:
-                    o, spec, phase = self.dec(z, pitchf, g=g) # f0 output
+                    o = self.dec(z_slice, g=g)
 
-                    return o, None, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
-
-            else: # For HiFi-Gan, PCPH-Gan and RefineGan training
-                if self.randomized:
-                    z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-
-                    if self.use_f0:
-                        pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                        o = self.dec(z_slice, pitchf, g=g)
-                    else:
-                        o = self.dec(z_slice, g=g)
-
-                    return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
-                else:
-                    if self.use_f0:
-                        o = self.dec(z, pitchf, g=g)
-                    else:
-                        o = self.dec(z, g=g)
-
-                    return o, None, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
         else:
             print(" NONE SPEC ")
             return None, None, x_mask, None, (None, None, m_p, logs_p, None, None)
@@ -298,17 +289,10 @@ class Synthesizer(torch.nn.Module):
         else:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
+        # Seed handler - receiver
         if seed != 0:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-            print(f"[INFER] Seed specified; Inference is performed in deterministic mode using seed:{seed}.")
-        else:
-            print(f"[INFER] Seed kept at: {seed}; Inference is performed in randomized mode.")
-            rand_seed = random.randint(0, 2**32 - 1)  # 32-bit seed range
-            random.seed(rand_seed)
-            torch.manual_seed(rand_seed)
-            torch.cuda.manual_seed_all(rand_seed)
-            print(f"[INFER] Randomized seed: {rand_seed}; Exposed for reproduction.")
 
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
 
@@ -323,8 +307,11 @@ class Synthesizer(torch.nn.Module):
 
         if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             o, _, _ = self.dec(z * x_mask, nsff0, g=g)
-        else:
+        elif self.vocoder == "APEX-GAN":
+            o = (self.dec(z * x_mask, nsff0, g=g, return_intermediates=False) if self.use_f0 else self.dec(z * x_mask, g=g, return_intermediates=False))
+        elif self.vocoder == "RefineGAN":
+            o = (self.dec(z * x_mask, nsff0, g=g) if self.use_f0 else self.dec(z * x_mask, g=g))
+        else: # HiFi-GAN
             o = (self.dec(z * x_mask, nsff0, g=g) if self.use_f0 else self.dec(z * x_mask, g=g))
 
         return o, x_mask, (z, z_p, m_p, logs_p)
-

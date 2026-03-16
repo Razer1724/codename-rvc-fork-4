@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+import math
 
 @triton.autotune(
     configs=[
@@ -19,6 +20,7 @@ def _pcph_dirichlet_kernel(
     stride_n,
     N_elements,
     EPS,
+    TWO_PI,
     BLOCK_SIZE: tl.constexpr
 ):
     pid = tl.program_id(0)
@@ -33,17 +35,19 @@ def _pcph_dirichlet_kernel(
     OUT = OUT + pid * stride_b
 
     # Load data once from VRAM into registers
-    phase = tl.load(PHASE + offsets, mask=mask)
+    phase_cycles = tl.load(PHASE + offsets, mask=mask)
     n = tl.load(N_HARMS + offsets, mask=mask)
 
-    # Calculate components in registers ( fused ) 
+    # Calculate components in registers ( fused )
+    phase = phase_cycles * TWO_PI
     half_phase = phase * 0.5
-    num = tl.cos(half_phase) - tl.cos((n + 0.5) * phase)
-    den = 2.0 * tl.sin(half_phase)
+    num = tl.sin(n * half_phase) * tl.sin((n + 1.0) * half_phase)
+    den = tl.sin(half_phase)
 
     # Safe division
     is_singular = tl.abs(den) < EPS
-    result = tl.where(is_singular, 0.0, num / den)
+    safe_den = tl.where(is_singular, 1.0, den)
+    result = tl.where(is_singular, 0.0, num / safe_den)
 
     # Store final result once back to VRAM
     tl.store(OUT + offsets, result, mask=mask)
@@ -54,11 +58,12 @@ def pcph_dirichlet_fwd(phase, n_harms, eps=1e-6):
 
     # Launch grid: (Batch * Channels, Blocks)
     grid = lambda meta: (batch * channels, triton.cdiv(length, meta['BLOCK_SIZE']))
+    two_pi = float(2.0 * math.pi)
 
     _pcph_dirichlet_kernel[grid](
         phase, n_harms, out,
         phase.stride(0), phase.stride(1), phase.stride(2),
-        length, eps
+        length, eps, two_pi
     )
     return out
 

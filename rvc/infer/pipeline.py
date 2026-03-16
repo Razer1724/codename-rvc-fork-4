@@ -1,7 +1,8 @@
 import os
+import sys
+import random
 import gc
 import re
-import sys
 import torch
 import torch.nn.functional as F
 import torchcrepe
@@ -251,6 +252,16 @@ class Pipeline:
             f0 = self.autotune.autotune_f0(f0, f0_autotune_strength)
         else:
             f0 *= pow(2, pitch / 12)
+
+        # Apply user-edited F0 if provided
+        if inp_f0 is not None:
+            replace_hz = inp_f0[:, 1].astype(np.float32)
+            replace_hz_shifted = replace_hz * pow(2, pitch / 12)
+            offset = self.t_pad // self.window
+            n = min(len(f0) - offset, len(replace_hz))
+            voiced = replace_hz[:n] > 0
+            f0[offset : offset + n][voiced] = replace_hz_shifted[:n][voiced]
+
         # quantizing f0 to 255 buckets to make coarse f0
         f0bak = f0.copy()
         f0_mel = 1127 * np.log(1 + f0 / 700)
@@ -419,6 +430,10 @@ class Pipeline:
             seed: Seed for randomization of noise.
             loaded_index: A pre-loaded FAISS index object.
         """
+
+        if seed == 0:
+            seed = random.randint(1, 2**32 - 1)
+
         # Index handling
         index = big_npy = None
         if loaded_index is not None and index_rate > 0:
