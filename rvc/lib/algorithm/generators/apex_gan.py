@@ -1,10 +1,3 @@
-import sys, os
-import pathlib
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
-import random, time
-import soundfile as sf
-
-
 import math
 from typing import Optional, Tuple, List
 from itertools import chain
@@ -22,11 +15,9 @@ from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.parametrize import is_parametrized, remove_parametrizations
 
 import torch.nn.functional as F
-
 from torch.amp import autocast # guard
-from torch.utils.checkpoint import checkpoint
 
-from rvc.lib.algorithm.generators.apex_gan_modules import PchipF0UpsamplerTorch, FusedGeoSaw, Snake
+from rvc.lib.algorithm.generators.apex_gan_modules import PchipF0UpsamplerTorch, FusedGeoSaw, FusedDirichlet, Snake
 
 
 def apply_mask(tensor: torch.Tensor, mask: Optional[torch.Tensor]):
@@ -222,7 +213,6 @@ class ResBlock(nn.Module):
     A residual block module that applies a series of 1D convolutional layers
     with residual connections.
     """
-
     def __init__(
         self,
         channels: int,
@@ -233,26 +223,28 @@ class ResBlock(nn.Module):
         self.convs1 = self._create_convs(channels, kernel_size, dilations)
         self.convs2 = self._create_convs(channels, kernel_size, [1] * len(dilations))
 
-        self.snake1 = Snake(channels, init='periodic', correction=None)
-        self.snake2 = Snake(channels, init='periodic', correction=None)
+        self.snakes1 = nn.ModuleList([
+            Snake(channels, init='periodic', correction=None) for _ in dilations
+        ])
+        self.snakes2 = nn.ModuleList([
+            Snake(channels, init='periodic', correction=None) for _ in dilations
+        ])
 
     @staticmethod
     def _create_convs(channels: int, kernel_size: int, dilations: Tuple[int]):
-        layers = nn.ModuleList(
+        return nn.ModuleList(
             [create_conv1d_layer(channels, kernel_size, d) for d in dilations]
         )
-        return layers
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):
-        for conv1, conv2 in zip(self.convs1, self.convs2):
-
+        for conv1, conv2, s1, s2 in zip(self.convs1, self.convs2, self.snakes1, self.snakes2):
             x_residual = x
 
-            xt = self.snake1(x)
+            xt = s1(x)
             xt = apply_mask(xt, x_mask)
             xt = conv1(xt)
 
-            xt = self.snake2(xt)
+            xt = s2(xt)
             xt = apply_mask(xt, x_mask)
             xt = conv2(xt)
 
@@ -264,6 +256,54 @@ class ResBlock(nn.Module):
     def remove_weight_norm(self):
         for conv in chain(self.convs1, self.convs2):
             remove_weight_norm_legacy_safe(conv)
+
+
+def pcph_generator(
+    f0: torch.Tensor,
+    hop_length: int,
+    sample_rate: int,
+    random_init_phase: bool = True,
+    power_factor: float = 0.1,
+    epsilon: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pseudo-Constant-Power Harmonics (PCPH) excitation signal generator.
+    """
+    batch, _, _ = f0.size()
+    device = f0.device
+
+    upsampler = PchipF0UpsamplerTorch(scale_factor=hop_length).to(device)
+    f0_upsampled = upsampler(f0)
+
+    if torch.all(f0_upsampled < 1.0):
+        _, _, total_length = f0_upsampled.size()
+        zeros = torch.zeros((batch, 1, total_length), device=device, dtype=f0_upsampled.dtype)
+        return zeros, zeros
+
+    voiced_mask = (f0_upsampled > 1.0).float()
+
+    phase_increment_f64 = f0_upsampled.double() / sample_rate
+    if random_init_phase:
+        init_phase = torch.rand((1, 1), device=device, dtype=torch.float64)
+        phase_increment_f64[:, :, :1] += init_phase
+
+    # Phase for FusedDirichlet: cumulative cycles in [0, 1), unwrapped then remainder
+    phase_cycles_f64 = torch.cumsum(phase_increment_f64, dim=2)
+    phase_cycles_f64 = torch.remainder(phase_cycles_f64, 1.0).float()
+
+    # Dynamic harmonic count: max harmonics below Nyquist at each sample
+    safe_f0 = torch.clamp(f0_upsampled, min=1.0)
+    N = torch.floor(sample_rate / (2.0 * safe_f0))
+
+    # Fused kernel for PCPH (Dirichlet cosine sum)
+    harmonics = FusedDirichlet.apply(phase_cycles_f64, N, epsilon)
+
+    # Normalization: pseudo-constant power across varying harmonic count
+    amp_scale = power_factor * torch.sqrt(2.0 / torch.clamp(N, min=1.0))
+    signal = harmonics * amp_scale * voiced_mask
+
+    return signal, f0_upsampled
+
 
 def fgss_generator(
     f0: torch.Tensor,
@@ -336,6 +376,7 @@ class ExcitationSynthesizer(nn.Module):
         power_factor: float = 0.1,
         add_noise_std: float = 0.003,
         r: float = 0.97,
+        signal_type: str = "fgss",
     ):
         super(ExcitationSynthesizer, self).__init__()
         self.sample_rate = sample_rate
@@ -344,6 +385,8 @@ class ExcitationSynthesizer(nn.Module):
         self.power_factor = power_factor
         self.noise_std = add_noise_std
         self.r = r
+        self.signal_type = signal_type
+
         self.l_linear = torch.nn.Linear(1, 1, bias=False)
         self.l_tanh = torch.nn.Tanh()
 
@@ -354,19 +397,28 @@ class ExcitationSynthesizer(nn.Module):
             f0 = f0.float()
 
             with torch.no_grad():
-                fgss_harmonic_signal, f0_upsampled = fgss_generator(
-                    f0,
-                    hop_length=hop,
-                    sample_rate=self.sample_rate,
-                    random_init_phase=self.random_init_phase,
-                    power_factor=self.power_factor,
-                    r=self.r,
-                )
+                if self.signal_type == "fgss":
+                    harmonic_signal, f0_upsampled = fgss_generator(
+                        f0,
+                        hop_length=hop,
+                        sample_rate=self.sample_rate,
+                        random_init_phase=self.random_init_phase,
+                        power_factor=self.power_factor,
+                        r=self.r,
+                    )
+                else:  # pcph
+                    harmonic_signal, f0_upsampled = pcph_generator(
+                        f0,
+                        hop_length=hop,
+                        sample_rate=self.sample_rate,
+                        random_init_phase=self.random_init_phase,
+                        power_factor=self.power_factor,
+                    )
 
             voiced_mask = (f0_upsampled > 1.0).float()
             noise_amp = voiced_mask * self.noise_std + (1.0 - voiced_mask) * (self.power_factor / 3.0)
-            noise = torch.randn_like(fgss_harmonic_signal) * noise_amp
-            excitation_signal = fgss_harmonic_signal + noise
+            noise = torch.randn_like(harmonic_signal) * noise_amp
+            excitation_signal = harmonic_signal + noise
 
         excitation_signal = excitation_signal.to(dtype=self.l_linear.weight.dtype)
         excitation_signal = excitation_signal.transpose(1, 2)
@@ -410,6 +462,7 @@ class APEX_GAN_Generator(nn.Module):
             power_factor=0.1,
             add_noise_std=0.003,
             r=0.97,
+            signal_type="pcph",  # available: "fgss" or "pcph"
         )
 
         # lowpass pyramid
@@ -423,6 +476,11 @@ class APEX_GAN_Generator(nn.Module):
         self.exc_proj = nn.ModuleList()
         self.conv_post = nn.ModuleList()
 
+        self.branch_weights = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.num_kernels))
+            for _ in range(self.num_upsamples)
+        ])
+
         ch = ch_conv_post = upsample_initial_channel  # 512
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             ch //= 2  # 256 -> 128 -> 64 -> 32
@@ -434,8 +492,8 @@ class APEX_GAN_Generator(nn.Module):
             for j, (kk, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes)):
                 self.resblocks.append(ResBlock(ch, kk, d))
 
-            # Excitation projection: [B,1,T_stage] --> [B,ch,T_stage]
-            self.exc_proj.append(nn.Conv1d(1, ch, kernel_size=1, bias=False))
+            # Excitation projection: [B, 1, T_stage] --> [B, ch, T_stage]
+            self.exc_proj.append(weight_norm(nn.Conv1d(1, ch, kernel_size=1, bias=False)))
 
         # Post convolution
         for i in range(self.num_upsamples):
@@ -473,20 +531,23 @@ class APEX_GAN_Generator(nn.Module):
             x = F.silu(x)
             x = self.ups[i](x)
 
-            # Project lowpass level [B,1,T_stage] --> [B,ch,T_stage] and inject
+            # Project lowpass level [B, 1, T_stage] --> [B, ch, T_stage] and inject
             exc_i = self.exc_proj[i](exc_levels[i])
 
             # Additive injuection of excitation to feats
             x.add_(exc_i)
             #x = x + exc_i
 
-            xs = None
-            for j in range(self.num_kernels):
-                if xs is None:
-                    xs = self.resblocks[i * self.num_kernels + j](x)
-                else:
-                    xs += self.resblocks[i * self.num_kernels + j](x)
-            x = xs / self.num_kernels
+            # xs = None
+            # for j in range(self.num_kernels):
+                # if xs is None:
+                    # xs = self.resblocks[i * self.num_kernels + j](x)
+                # else:
+                    # xs += self.resblocks[i * self.num_kernels + j](x)
+
+            # Resblocks processing
+            weights = torch.softmax(self.branch_weights[i], dim=0)
+            x = sum(w * block(x) for w, block in zip(weights, self.resblocks[i*self.num_kernels:(i+1)*self.num_kernels]))
 
             if i >= self.num_upsamples - 3:
                 _x = F.silu(x)
@@ -501,6 +562,9 @@ class APEX_GAN_Generator(nn.Module):
         remove_weight_norm_legacy_safe(self.conv_pre)
         # upsamplers
         for l in self.ups:
+            remove_weight_norm_legacy_safe(l)
+        # excitation projection
+        for l in self.exc_proj:
             remove_weight_norm_legacy_safe(l)
         # ResBlocks
         for l in self.resblocks:
@@ -520,6 +584,14 @@ class APEX_GAN_Generator(nn.Module):
                 remove_weight_norm_legacy_safe(self.conv_pre)
         # upsamplers
         for l in self.ups:
+            for hook in l._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    remove_weight_norm_legacy_safe(l)
+        # excitation projection
+        for l in self.exc_proj:
             for hook in l._forward_pre_hooks.values():
                 if (
                     hook.__module__ == "torch.nn.utils.parametrizations.weight_norm"

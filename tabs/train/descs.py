@@ -169,10 +169,9 @@ Smaller batch size:
 
 
 SPECTRAL_LOSS_INFO = textwrap.dedent("""\
-- **L1 Mel Loss:** Standard L1 mel spectrogram loss - **Safe default.**
-- **Multi-Scale Mel Loss:** Mel spectrogram loss that utilizes multiple-scales - **Results vary.**
-- **Multi-Res STFT Loss:** STFT Spec. based loss that utilizes multiple-resolutions
-( **EXPERIMENTAL.** )
+- **L1 Mel Loss:** L1 loss using mel spec - **Safe default.**
+- **Multi-Scale Mel Loss:** Multi-scale L1 mel spec loss.
+- **Multi-Res STFT Loss:** Multi-res. STFT spec + Spectral Convergence loss.
 """)
 
 

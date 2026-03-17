@@ -42,7 +42,6 @@ from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import auraloss
 
 now_dir = os.getcwd()
 sys.path.append(os.path.join(now_dir))
@@ -77,7 +76,8 @@ from losses import (
     HingeAdversarialLoss,
     feature_loss,
     kl_loss,
-    phase_loss
+    phase_loss,
+    MRSTFTLoss,
 )
 from mel_processing import (
     spec_to_mel_torch,
@@ -161,7 +161,7 @@ use_lr_scheduler = lr_scheduler != "none"
 # Globals ( tweakable~ )
 enable_persistent_workers = True
 
-c_stft = 21.0 # Seems close enough to multi-scale mel loss's magnitude, but needs more testing.
+c_stft = 26.5 # Aligned with Multi-Scale Mel weighting
 
 pretrain_preview = True
 pretrain_preview_interval = 100 # Measured in steps.
@@ -807,17 +807,7 @@ def run(
     elif spectral_loss == "Multi-Scale Mel Loss":
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
     elif spectral_loss == "Multi-Res STFT Loss":
-        fn_spectral_loss = auraloss.freq.MultiResolutionSTFTLoss(
-            fft_sizes = [1024, 2048, 4096],
-            hop_sizes = [256, 512, 1024],
-            win_lengths = [1024, 2048, 4096],
-            window = "hann_window",
-            scale = "mel",
-            n_bins = 128,
-            sample_rate = sample_rate,
-            perceptual_weighting = True,
-            device=device,
-        )
+        fn_spectral_loss = MRSTFTLoss(sample_rate=sample_rate)
     else:
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)

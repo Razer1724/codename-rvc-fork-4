@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch import Tensor
+from rvc.train.stft_loss_tweaked import STFTLoss
 
 def phase_loss(x_fft: torch.Tensor, g_fft: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
     x_norm = x_fft / (x_fft.abs() + 1e-9)
@@ -179,16 +180,51 @@ class HingeAdversarialLoss(nn.Module):
         return -torch.mean(torch.min(-x - 1, x.new_zeros(x.size())))
 
 
-def envelope_loss(y_real, y_fake, 
-                  pool=nn.MaxPool1d(kernel_size=5, stride=3), 
-                  criterion=nn.L1Loss()):
-    """
-    Calculates the envelope loss between real and generated audio.
-    Matches volume peaks and troughs to improve transient clarity.
-    """
+class MRSTFTLoss(nn.Module):
+    def __init__(self, sample_rate: int):
+        super().__init__()
+        self.losses = nn.ModuleList([
+            STFTLoss(
+                fft_size=128,   hop_size=32,  win_length=128,
+                window="hann_window",
+                w_sc=1.0, w_log_mag=1.0,
+                scale="mel", n_bins=20,
+                sample_rate=sample_rate,
+                log_eps=1e-5,
+            ),
+            STFTLoss(
+                fft_size=256,   hop_size=64,  win_length=256,
+                window="hann_window",
+                w_sc=1.0, w_log_mag=1.0,
+                scale="mel", n_bins=40,
+                sample_rate=sample_rate,
+                log_eps=1e-5,
+            ),
+            STFTLoss(
+                fft_size=512,   hop_size=128, win_length=512,
+                window="hann_window",
+                w_sc=1.0, w_log_mag=1.0,
+                scale="mel", n_bins=80,
+                sample_rate=sample_rate,
+                log_eps=1e-5,
+            ),
+            STFTLoss(
+                fft_size=1024,  hop_size=256, win_length=1024,
+                window="hann_window",
+                w_sc=1.0, w_log_mag=1.0,
+                scale="mel", n_bins=160,
+                sample_rate=sample_rate,
+                log_eps=1e-5,
+            ),
+            STFTLoss(
+                fft_size=2048,  hop_size=512, win_length=2048,
+                window="hann_window",
+                w_sc=1.0, w_log_mag=1.0,
+                scale="mel", n_bins=320,
+                sample_rate=sample_rate,
+                log_eps=1e-5,
+            ),
+        ])
 
-    # Calculate loss for both polarities (peaks and troughs)
-    loss_pos = criterion(pool(y_real), pool(y_fake))
-    loss_neg = criterion(pool(-y_real), pool(-y_fake))
-    
-    return loss_pos + loss_neg
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return sum(loss(x, y) for loss in self.losses) / len(self.losses)
