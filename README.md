@@ -22,19 +22,13 @@
 <br/>
 # ⚠️ㅤ**IMPORTANT** ㅤ⚠️
 `1. Datasets must be processed properly:`
-- Peak or RMS compression if necessary! ( This step isn't covered by the fork's preprocessing btw.)
-- Silence-truncation ( Absolutely necessary. )
-- 'simple' method chosen for preprocessing ( Even 3 sec segments. )
-- Enable Loudness Normalization in the ui.
-- Enable automatic LUFS range finder for Loudness Normalization. <br/>
-``Expect issues with PESQ and data alignment If the following requirements are not met.``
-
+- In case of wild dynamic range or inconsistent recording sessions, peak / rms compression is advised.
+- silence-truncating your dataset ( Or at least ensure the gaps / silences aren't too crazy or inconsistent. ) 
 
 `2. Experimental things are experimental for a reason:`
 - If you don't understand what it does, what it brings or how it works? preferably don't use it.
 - Certain features / currently chosen params can be potentially unstable or broken and are a subject to change.
-- Not all experimental features gonna reach "stable" status ( There's only as much I can test/ablation study on my own. )
-- Some experimental things might disappear at some point if deemed too unstable / not worth it.
+- Some experimental things might disappear at some point if deemed too unstable / not worth the risk.
 
 `3. Clarification on pretrained models, architectures & vocoders:`
 - **Each Architecture/Vocoder requires own dedicated pretrains.**
@@ -46,25 +40,24 @@
 - Custom architecture. ( RefineGAN + MPD, MSD )
 - **Pretrains available. For more info, visit my discord server.** <br/><br/>`Models made with this arch are LIMITED cross-compatible: codename-rvc-fork-4 and Applio`
 ##### 3. RingFormer ( Fork architecture ):
-- Custom architecture. ( RingFormer + MPD, MSD, MRD )
-- **There are no available pretrained models for it. atm it's unsure if there will be any.**
+- As it is right now, this architecture remains in question.
+##### 4. APEX-GAN ( Fork architecture ):
+- A direct continuation of the previous vocoder, known under the alias "PCPH-GAN".
+- Custom architecture. ( APEX-GAN + CoMBD, MSB, UnivHD )
+- **There are no available pretrained models for it yet. Currently in "trials+polishing" phase.**
 - Supported sample rates: 24, 32, 40 and 48khz.<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
-##### 4. PCPH-GAN ( Fork architecture ):
-- Custom architecture. ( PCPH-GAN + MPD, MSD, MRD )
-- **There are no available pretrained models for it yet. Currently in test/prototyping phase.**
-- Supported sample rates: 32, 40 and 48khz.<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
 <br/>
 
 # **Fork's exclusive features:**
  
-- Hold-Out type validation mechanism during training. `( L1 MEL, mrSTFT, PESQ, SI-SDR )`
- 
 - My own ml-based silence-truncation approach.
 <br/>[More info](https://github.com/codename0og/SmartCutter)
  
+- F0 / Pitch curve editor for inference integrated in the UI.
+ 
 - Support for 'Spin' embedder. ` ( and perhaps more in future. ) `
  
-- Many available optimizers.  ` ( AdamW [and optimi variant for bf16), RAdam, AdamSPD, Ranger21, DiffGrad, Prodigy ) `
+- Many available optimizers.  ` ( AdamW, RAdam, AdamSPD, Ranger21, DiffGrad ) `
  
 - Different adversarial losses to try. ` ( Available: lsgan, hinge, tprls. [ lsgan is the safe / rvc's default one. ] ) `
  
@@ -72,17 +65,18 @@
  
 - Support for some of VITS2 enhancements.
 `( Transformer-enhanced normalizing flow + spk conditioned text encoder. )`<br/>
-`( Requires pretrains that were trained with it enabled. )`
+`( Requires pretrains that were trained with it. )`
  
-- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, PCPH-GAN.<br/>
-` RingFormer and PCPH-GAN architectures utilize MPD, MSD and MRD Discs combo.`
+- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, APEX-GAN.<br/>
  
 - Much better loss logging handling.
-`( Per-epoch-avg loss as the main one, over-50-steps rolling avg as the long-term one )`
+`( Per-epoch-avg loss as the main one, rolling avg as the long-term one )`
  
 - More sophisticated dataset-preprocessing approach.
  
-- Quick from-ui tweaks ` ( lr for g/d, lr schedulers, linear warmup, kl loss annealing and much more .. )`
+- Lots of deeper training-related tweaks directly in the ui. ` ( lr for g/d, schedulers, linear warmup, kl loss annealing and much more .. )`
+ 
+- Direct integration of [SmartCutter](https://github.com/codename0og/SmartCutter)
  
 - Various speed and performance improvements.
 
@@ -95,10 +89,12 @@
  
 ✨ to-do list ✨
 > - Better long-term logging for pretrained / base models training.
-> - Some additional feedback during training in terms of model's performance. 
+> - Some additional feedback during training in terms of model's performance.
+> - Need to figure out a better / more appropriate validation..
  
 💡 Ideas / concepts 💡
-> - Currently none. Open to your ideas ~
+> - Upscaling / Refinement for Inference output and for datasets.
+> - If you have some nice ideas, feel free to share 'em or PR!
  
  
 ### ❗ For contact, please join my discord server ❗
@@ -124,16 +120,21 @@ This launches the Gradio interface in your default browser.
 ### 3. Optional: TensorBoard Monitoring
  
 To monitor training or visualize data:
-- Run the " run_tensorboard_in_model_folder.bat " file from logs folder and paste in there path to your model's folder </br>( containing 'eval' folder or tfevents file/s. )</br></br>If it doesn't work for you due to blocked port, open up CMD with admin rights and use this command:</br>`` netsh advfirewall firewall add rule name="Open Port 25565" dir=in action=allow protocol=TCP localport=25565 ``</br></br>
+- Drag the 'eval' folder onto "run_tensorboard_in_model_folder.bat" ( you can copy it from logs dir -> your model's dir ).
+</br></br>If it doesn't work for you due to blocked port, open up CMD with admin rights and use this command:</br>`` netsh advfirewall firewall add rule name="Open Port 25565" dir=in action=allow protocol=TCP localport=25565 ``</br></br>
 - Alternatively if the above method fails, run the tensorboard manually in cmd:</br> ``tensorboard --logdir="path/to/your/model/folder" --bind_all``</br>
 (PS. Make sure you have tensorboard installed. ( in cmd:  pip install tensorboard )
  
 ## Referenced projects
++ [Retrieval-based-Voice-Conversion-WebUI](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI)
++ [Applio](https://github.com/IAHispano/Applio)
 + [RingFormer](https://github.com/seongho608/RingFormer)
 + [RiFornet](https://github.com/Respaired/RiFornet_Vocoder)
 + [BigVGAN](https://github.com/NVIDIA/BigVGAN/tree/main)
 + [Pytorch-Snake](https://github.com/falkaer/pytorch-snake)
 + [wavehax](https://github.com/chomeyama/wavehax)
++ [auraloss](https://github.com/csteinmetz1/auraloss/tree/main)
++ [Avocodo](https://github.com/ncsoft/avocodo)
 
  
 ## Disclaimer
