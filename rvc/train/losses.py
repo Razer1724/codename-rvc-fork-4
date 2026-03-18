@@ -181,49 +181,39 @@ class HingeAdversarialLoss(nn.Module):
 
 
 class MRSTFTLoss(nn.Module):
-    def __init__(self, sample_rate: int):
+    def __init__(self, sample_rate: int, graduated: bool = True, perceptual_weighting: bool = True):
         super().__init__()
+
+        if graduated:
+            resolution_configs = [
+                (128, 20, 0.0),
+                (256, 40, 0.3),
+                (512, 80, 0.5),
+                (1024, 160, 0.7),
+                (2048, 320, 1.0),
+            ]
+        else:
+            resolution_configs = [
+                (128, 20, 1.0),
+                (256, 40, 1.0),
+                (512, 80, 1.0),
+                (1024, 160, 1.0),
+                (2048, 320, 1.0),
+            ]
         self.losses = nn.ModuleList([
             STFTLoss(
-                fft_size=128,   hop_size=32,  win_length=128,
+                fft_size=fft_size,
+                hop_size=fft_size // 4,
+                win_length=fft_size,
                 window="hann_window",
-                w_sc=1.0, w_log_mag=1.0,
-                scale="mel", n_bins=20,
+                w_sc=w_sc,
+                w_log_mag=1.0,
+                scale=None,
+                perceptual_weighting=perceptual_weighting,
+                n_bins=n_bins,
                 sample_rate=sample_rate,
                 log_eps=1e-5,
-            ),
-            STFTLoss(
-                fft_size=256,   hop_size=64,  win_length=256,
-                window="hann_window",
-                w_sc=1.0, w_log_mag=1.0,
-                scale="mel", n_bins=40,
-                sample_rate=sample_rate,
-                log_eps=1e-5,
-            ),
-            STFTLoss(
-                fft_size=512,   hop_size=128, win_length=512,
-                window="hann_window",
-                w_sc=1.0, w_log_mag=1.0,
-                scale="mel", n_bins=80,
-                sample_rate=sample_rate,
-                log_eps=1e-5,
-            ),
-            STFTLoss(
-                fft_size=1024,  hop_size=256, win_length=1024,
-                window="hann_window",
-                w_sc=1.0, w_log_mag=1.0,
-                scale="mel", n_bins=160,
-                sample_rate=sample_rate,
-                log_eps=1e-5,
-            ),
-            STFTLoss(
-                fft_size=2048,  hop_size=512, win_length=2048,
-                window="hann_window",
-                w_sc=1.0, w_log_mag=1.0,
-                scale="mel", n_bins=320,
-                sample_rate=sample_rate,
-                log_eps=1e-5,
-            ),
+            ) for fft_size, n_bins, w_sc in resolution_configs
         ])
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

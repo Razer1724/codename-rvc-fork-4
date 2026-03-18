@@ -9,7 +9,7 @@ Taken from the auraloss repository by Christian Steinmetz:
     https://github.com/csteinmetz1/auraloss/blob/main/auraloss/utils.py
 
 Modifications for Codename-RVC-Fork-4:
-    - Removed unused loss classes and stereo/perceptual components
+    - Removed unused loss classes / components
     - SpectralConvergenceLoss: On silent / mute batches, we skip the sc calculation
     - STFTLoss: removed w_lin_mag and w_phs terms
     - Original license: MIT (https://github.com/csteinmetz1/auraloss/blob/main/LICENSE)
@@ -44,6 +44,103 @@ def get_window(win_type: str, win_length: int):
         win = torch.from_numpy(scipy.signal.windows.get_window(win_type, win_length))
 
     return win
+
+
+class FIRFilter(torch.nn.Module):
+    """FIR pre-emphasis filtering module.
+
+    Args:
+        filter_type (str): Shape of the desired FIR filter ("hp", "fd", "aw"). Default: "hp"
+        coef (float): Coefficient value for the filter tap (only applicable for "hp" and "fd"). Default: 0.85
+        ntaps (int): Number of FIR filter taps for constructing A-weighting filters. Default: 101
+        plot (bool): Plot the magnitude respond of the filter. Default: False
+
+    Based upon the perceptual loss pre-empahsis filters proposed by
+    [Wright & Välimäki, 2019](https://arxiv.org/abs/1911.08922).
+
+    A-weighting filter - "aw"
+    First-order highpass - "hp"
+    Folded differentiator - "fd"
+
+    Note that the default coefficeint value of 0.85 is optimized for
+    a sampling rate of 44.1 kHz, considering adjusting this value at differnt sampling rates.
+    """
+
+    def __init__(self, filter_type="hp", coef=0.85, fs=44100, ntaps=101, plot=False):
+        """Initilize FIR pre-emphasis filtering module."""
+        super(FIRFilter, self).__init__()
+        self.filter_type = filter_type
+        self.coef = coef
+        self.fs = fs
+        self.ntaps = ntaps
+        self.plot = plot
+
+        import scipy.signal
+
+        if ntaps % 2 == 0:
+            raise ValueError(f"ntaps must be odd (ntaps={ntaps}).")
+
+        if filter_type == "hp":
+            self.fir = torch.nn.Conv1d(1, 1, kernel_size=3, bias=False, padding=1)
+            self.fir.weight.requires_grad = False
+            self.fir.weight.data = torch.tensor([1, -coef, 0]).view(1, 1, -1)
+        elif filter_type == "fd":
+            self.fir = torch.nn.Conv1d(1, 1, kernel_size=3, bias=False, padding=1)
+            self.fir.weight.requires_grad = False
+            self.fir.weight.data = torch.tensor([1, 0, -coef]).view(1, 1, -1)
+        elif filter_type == "aw":
+            # Definition of analog A-weighting filter according to IEC/CD 1672.
+            f1 = 20.598997
+            f2 = 107.65265
+            f3 = 737.86223
+            f4 = 12194.217
+            A1000 = 1.9997
+
+            NUMs = [(2 * np.pi * f4) ** 2 * (10 ** (A1000 / 20)), 0, 0, 0, 0]
+            DENs = np.polymul(
+                [1, 4 * np.pi * f4, (2 * np.pi * f4) ** 2],
+                [1, 4 * np.pi * f1, (2 * np.pi * f1) ** 2],
+            )
+            DENs = np.polymul(
+                np.polymul(DENs, [1, 2 * np.pi * f3]), [1, 2 * np.pi * f2]
+            )
+
+            # convert analog filter to digital filter
+            b, a = scipy.signal.bilinear(NUMs, DENs, fs=fs)
+
+            # compute the digital filter frequency response
+            w_iir, h_iir = scipy.signal.freqz(b, a, worN=512, fs=fs)
+
+            # then we fit to 101 tap FIR filter with least squares
+            taps = scipy.signal.firls(ntaps, w_iir, abs(h_iir), fs=fs)
+
+            # now implement this digital FIR filter as a Conv1d layer
+            self.fir = torch.nn.Conv1d(
+                1, 1, kernel_size=ntaps, bias=False, padding=ntaps // 2
+            )
+            self.fir.weight.requires_grad = False
+            self.fir.weight.data = torch.tensor(taps.astype("float32")).view(1, 1, -1)
+
+            if plot:
+                from .plotting import compare_filters
+                compare_filters(b, a, taps, fs=fs)
+
+    def forward(self, input, target):
+        """Calculate forward propagation.
+        Args:
+            input (Tensor): Predicted signal (B, #channels, #samples).
+            target (Tensor): Groundtruth signal (B, #channels, #samples).
+        Returns:
+            Tensor: Filtered signal.
+        """
+        weight = self.fir.weight.data.to(input.device)
+        input = torch.nn.functional.conv1d(
+            input, weight, padding=self.ntaps // 2
+        )
+        target = torch.nn.functional.conv1d(
+            target, weight, padding=self.ntaps // 2
+        )
+        return input, target
 
 
 class SpectralConvergenceLoss(torch.nn.Module):
@@ -120,7 +217,6 @@ class STFTLoss(torch.nn.Module):
             Default: 'hann_window'
         w_sc (float, optional): Weight of the spectral convergence loss term. Default: 1.0
         w_log_mag (float, optional): Weight of the log magnitude loss term. Default: 1.0
-        w_phs (float, optional): Weight of the spectral phase loss term. Default: 0.0
         sample_rate (int, optional): Sample rate. Required when scale = 'mel'. Default: None
         scale (str, optional): Optional frequency scaling method, options include:
             ['mel', 'chroma']
@@ -154,9 +250,9 @@ class STFTLoss(torch.nn.Module):
         window: str = "hann_window",
         w_sc: float = 1.0,
         w_log_mag: float = 1.0,
-        w_phs: float = 0.0,
         sample_rate: float = None,
         scale: str = None,
+        perceptual_weighting: bool = False,
         n_bins: int = None,
         eps: float = 1e-8,
         output: str = "loss",
@@ -172,17 +268,15 @@ class STFTLoss(torch.nn.Module):
         self.window = get_window(window, win_length)
         self.w_sc = w_sc
         self.w_log_mag = w_log_mag
-        self.w_phs = w_phs
         self.sample_rate = sample_rate
         self.scale = scale
+        self.perceptual_weighting = perceptual_weighting
         self.n_bins = n_bins
         self.eps = eps
         self.output = output
         self.reduction = reduction
         self.mag_distance = mag_distance
         self.device = device
-
-        self.phs_used = bool(self.w_phs)
 
         self.spectralconv = SpectralConvergenceLoss()
         self.logstft = STFTMagnitudeLoss(
@@ -191,6 +285,14 @@ class STFTLoss(torch.nn.Module):
             distance=mag_distance,
             **kwargs
         )
+
+        # Perceptual / A-weighting
+        if self.perceptual_weighting:
+            if sample_rate is None:
+                raise ValueError("sample_rate required for perceptual_weighting")
+            self.prefilter = FIRFilter(filter_type="aw", fs=sample_rate)
+        else:
+            self.prefilter = None
 
         # setup mel filterbank
         if scale is not None:
@@ -244,13 +346,7 @@ class STFTLoss(torch.nn.Module):
             torch.clamp((x_stft.real**2) + (x_stft.imag**2), min=self.eps)
         )
 
-        # torch.angle is expensive, so it is only evaluated if the values are used in the loss
-        if self.phs_used:
-            x_phs = torch.angle(x_stft)
-        else:
-            x_phs = None
-
-        return x_mag, x_phs
+        return x_mag
 
     def forward(self, input: torch.Tensor, target: torch.Tensor):
         bs, chs, seq_len = input.size()
@@ -258,12 +354,20 @@ class STFTLoss(torch.nn.Module):
         # compute the magnitude and phase spectra of input and target
         self.window = self.window.to(input.device)
 
-        # skip entire loss for silent targets before any computation
-        if target.abs().max() < 1e-6:
-            return torch.tensor(0.0, device=input.device)
+        # apply A-weighting prefilter before STFT if enabled
+        if self.prefilter is not None:
+            input_f, target_f = self.prefilter(
+                input.view(-1, 1, input.size(-1)),
+                target.view(-1, 1, target.size(-1))
+            )
+            input_f = input_f.squeeze(1)
+            target_f = target_f.squeeze(1)
+        else:
+            input_f = input.view(-1, input.size(-1))
+            target_f = target.view(-1, target.size(-1))
 
-        x_mag, x_phs = self.stft(input.view(-1, input.size(-1)))
-        y_mag, y_phs = self.stft(target.view(-1, target.size(-1)))
+        x_mag = self.stft(input_f)
+        y_mag = self.stft(target_f)
 
         # apply relevant transforms
         if self.scale is not None:
@@ -272,7 +376,7 @@ class STFTLoss(torch.nn.Module):
             y_mag = torch.matmul(self.fb, y_mag)
 
         # compute loss terms
-        # We exclude SC on " mute " / silent batches as it is meaningless and unstable
+        # SC is skipped for silent samples / mutes, log magnitude still runs
         is_silent = target.abs().max() < 1e-6
         sc_mag_loss = 0.0 if is_silent else (self.spectralconv(x_mag, y_mag) if self.w_sc else 0.0)
         log_mag_loss = self.logstft(x_mag, y_mag) if self.w_log_mag else 0.0

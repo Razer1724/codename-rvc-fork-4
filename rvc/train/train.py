@@ -161,7 +161,7 @@ use_lr_scheduler = lr_scheduler != "none"
 # Globals ( tweakable~ )
 enable_persistent_workers = True
 
-c_stft = 26.5 # Aligned with Multi-Scale Mel weighting
+c_stft = 25 # Aligned with Mel losses (l1, multi-scale);  26.5 for sc 1.0 + mel scale,  25 for graduated sc + Perceptual weighting
 
 pretrain_preview = True
 pretrain_preview_interval = 100 # Measured in steps.
@@ -184,7 +184,6 @@ custom_sid = 1
 
 import logging
 logging.getLogger("torch").setLevel(logging.ERROR)
-
 
 class NullDiscriminator(nn.Module):
     def __init__(self):
@@ -807,7 +806,7 @@ def run(
     elif spectral_loss == "Multi-Scale Mel Loss":
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
     elif spectral_loss == "Multi-Res STFT Loss":
-        fn_spectral_loss = MRSTFTLoss(sample_rate=sample_rate)
+        fn_spectral_loss = MRSTFTLoss(sample_rate=sample_rate, graduated=True, perceptual_weighting=True)
     else:
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)
@@ -1164,7 +1163,7 @@ def training_loop(
 
                 # Feature Matching loss
                 loss_fm = feature_loss(fmap_r, fmap_g)
-     
+
                 # Generator loss
                 if adversarial_loss == "lsgan":
                     loss_adv = generator_loss(y_d_hat_g)
