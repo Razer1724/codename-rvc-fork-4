@@ -274,13 +274,13 @@ fp16_check = None
 if microarchitecture_capability_checker():
     # Ampere-Microarchitecture and higher viable:
     initial_optimizer = "AdamW"
-    initial_optimizer_choices = ["AdamW", "RAdam", "AdamSPD", "Ranger21", "DiffGrad"]
+    initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
     architecture_choices = ["RVC", "Fork/Applio", "Fork"]
     fp16_check = True
 else:
     # Below Ampere-Microarchitecture viable:
     initial_optimizer = "AdamW"
-    initial_optimizer_choices = ["AdamW", "RAdam", "AdamSPD", "Ranger21", "DiffGrad"]
+    initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
     architecture_choices = ["RVC", "Fork/Applio"]
     fp16_check = True
 
@@ -288,7 +288,7 @@ else:
 if fp16_check:
     if check_if_fp16():
         initial_optimizer = "AdamW"
-        initial_optimizer_choices = ["AdamW", "RAdam", "AdamSPD", "Ranger21", "DiffGrad"]
+        initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
 
 
 # Train Tab
@@ -340,7 +340,7 @@ def train_tab():
                 vocoder_arch = gr.State("hifi_refine")
                 optimizer = gr.Radio(
                     label="Optimizer",
-                    info="Choose an optimizer used in training: \n ( If unsure, just leave it as it is or try these in this order: AdamW -> RAdam -> AdamSPD. ) \n- **AdamW:** Default; Safe and reliable. \n- **RAdam:** Rectified Adam. ( **Can help** with early instability - **Most likely slower convergence** ) \n- **AdamSPD:** Adam with SPD. ( SPD: New weight-decay technique **tailored for fine-tuning.** ) \n- **Ranger21:** AdamW + LookAhead and few more extras. ( **Most likely unstable** ) \n- **DiffGrad:** An optimizer with CNN in mind. ( **Probs** a good AdamW alternative - **For finetuning** )",
+                    info=OPTIMIZER_INFO,
                     choices=initial_optimizer_choices,
                     value=initial_optimizer,
                     interactive=True,
@@ -783,7 +783,7 @@ def train_tab():
                     spectral_loss = gr.Radio(
                         label="Spectral loss",
                         info=SPECTRAL_LOSS_INFO,
-                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Multi-Res STFT Loss"],
+                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Multi-Res STFT Loss", "Hybrid L1", "Hybrid MS"],
                         value="L1 Mel Loss",
                         interactive=True,
                         key='spectral_loss'

@@ -10,7 +10,6 @@ Taken from the auraloss repository by Christian Steinmetz:
 
 Modifications for Codename-RVC-Fork-4:
     - Removed unused loss classes / components
-    - SpectralConvergenceLoss: On silent / mute batches, we skip the sc calculation
     - STFTLoss: removed w_lin_mag and w_phs terms
     - Original license: MIT (https://github.com/csteinmetz1/auraloss/blob/main/LICENSE)
 """
@@ -133,31 +132,14 @@ class FIRFilter(torch.nn.Module):
         Returns:
             Tensor: Filtered signal.
         """
-        weight = self.fir.weight.data.to(input.device)
         input = torch.nn.functional.conv1d(
-            input, weight, padding=self.ntaps // 2
+            input, self.fir.weight.data, padding=self.ntaps // 2
         )
         target = torch.nn.functional.conv1d(
-            target, weight, padding=self.ntaps // 2
+            target, self.fir.weight.data, padding=self.ntaps // 2
         )
         return input, target
 
-
-class SpectralConvergenceLoss(torch.nn.Module):
-    """Spectral convergence loss module.
-
-    See [Arik et al., 2018](https://arxiv.org/abs/1808.06719).
-    """
-
-    def __init__(self):
-        super(SpectralConvergenceLoss, self).__init__()
-
-    def forward(self, x_mag, y_mag):
-        y_norm = torch.norm(y_mag, p="fro")
-        if y_norm < 1e-6:  # skip SC for mutes
-            print(f"[SC] silent target detected, returning 0")
-            return torch.tensor(0.0, device=x_mag.device)
-        return torch.norm(y_mag - x_mag, p="fro") / y_norm
 
 class STFTMagnitudeLoss(torch.nn.Module):
     """STFT magnitude loss module.
@@ -181,7 +163,7 @@ class STFTMagnitudeLoss(torch.nn.Module):
         reduction (str, optional): Reduction of the loss elements. Default: "mean"
     """
 
-    def __init__(self, log=True, log_eps=0.0, log_fac=1.0, distance="L1", reduction="mean"):
+    def __init__(self, log=True, log_eps=1e-5, log_fac=1.0, distance="L1", reduction="mean"):
         super(STFTMagnitudeLoss, self).__init__()
 
         self.log = log
@@ -197,8 +179,8 @@ class STFTMagnitudeLoss(torch.nn.Module):
 
     def forward(self, x_mag, y_mag):
         if self.log:
-            x_mag = torch.log(self.log_fac * x_mag + self.log_eps)
-            y_mag = torch.log(self.log_fac * y_mag + self.log_eps)
+            x_mag = torch.log(self.log_fac * x_mag.clamp(min=self.log_eps))
+            y_mag = torch.log(self.log_fac * y_mag.clamp(min=self.log_eps))
         return self.distance(x_mag, y_mag)
 
 
@@ -206,6 +188,7 @@ class STFTLoss(torch.nn.Module):
     """STFT loss module.
 
     See [Yamamoto et al. 2019](https://arxiv.org/abs/1904.04472).
+
 
     Args:
         fft_size (int, optional): FFT size in samples. Default: 1024
@@ -215,18 +198,12 @@ class STFTLoss(torch.nn.Module):
             ['hann_window', 'bartlett_window', 'blackman_window', 'hamming_window', 'kaiser_window']
             or any of the windows provided by [SciPy](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.windows.get_window.html).
             Default: 'hann_window'
-        w_sc (float, optional): Weight of the spectral convergence loss term. Default: 1.0
         w_log_mag (float, optional): Weight of the log magnitude loss term. Default: 1.0
         sample_rate (int, optional): Sample rate. Required when scale = 'mel'. Default: None
         scale (str, optional): Optional frequency scaling method, options include:
             ['mel', 'chroma']
             Default: None
-        n_bins (int, optional): Number of scaling frequency bins. Default: None.
         eps (float, optional): Small epsilon value for stablity. Default: 1e-8
-        output (str, optional): Format of the loss returned.
-            'loss' : Return only the raw, aggregate loss term.
-            'full' : Return the raw loss, plus intermediate loss terms.
-            Default: 'loss'
         reduction (str, optional): Specifies the reduction to apply to the output:
             'none': no reduction will be applied,
             'mean': the sum of the output will be divided by the number of elements in the output,
@@ -236,10 +213,7 @@ class STFTLoss(torch.nn.Module):
         device (str, optional): Place the filterbanks on specified device. Default: None
 
     Returns:
-        loss:
-            Aggreate loss term. Only returned if output='loss'. By default.
-        loss, sc_mag_loss, log_mag_loss:
-            Aggregate and intermediate loss terms. Only returned if output='full'.
+        loss: Aggreate loss term.
     """
 
     def __init__(
@@ -248,14 +222,11 @@ class STFTLoss(torch.nn.Module):
         hop_size: int = 256,
         win_length: int = 1024,
         window: str = "hann_window",
-        w_sc: float = 1.0,
         w_log_mag: float = 1.0,
         sample_rate: float = None,
-        scale: str = None,
         perceptual_weighting: bool = False,
-        n_bins: int = None,
         eps: float = 1e-8,
-        output: str = "loss",
+        log_eps: float = 1e-5,
         reduction: str = "mean",
         mag_distance: str = "L1",
         device: Any = None,
@@ -266,21 +237,17 @@ class STFTLoss(torch.nn.Module):
         self.hop_size = hop_size
         self.win_length = win_length
         self.window = get_window(window, win_length)
-        self.w_sc = w_sc
         self.w_log_mag = w_log_mag
         self.sample_rate = sample_rate
-        self.scale = scale
         self.perceptual_weighting = perceptual_weighting
-        self.n_bins = n_bins
         self.eps = eps
-        self.output = output
         self.reduction = reduction
         self.mag_distance = mag_distance
         self.device = device
 
-        self.spectralconv = SpectralConvergenceLoss()
         self.logstft = STFTMagnitudeLoss(
             log=True,
+            log_eps=log_eps,
             reduction=reduction,
             distance=mag_distance,
             **kwargs
@@ -294,45 +261,14 @@ class STFTLoss(torch.nn.Module):
         else:
             self.prefilter = None
 
-        # setup mel filterbank
-        if scale is not None:
-            try:
-                import librosa.filters
-            except Exception as e:
-                print(e)
-                print("Try `pip install auraloss[all]`.")
-
-            if self.scale == "mel":
-                assert sample_rate != None  # Must set sample rate to use mel scale
-                assert n_bins <= fft_size  # Must be more FFT bins than Mel bins
-                fb = librosa.filters.mel(sr=sample_rate, n_fft=fft_size, n_mels=n_bins)
-                fb = torch.tensor(fb).unsqueeze(0)
-
-            elif self.scale == "chroma":
-                assert sample_rate != None  # Must set sample rate to use chroma scale
-                assert n_bins <= fft_size  # Must be more FFT bins than chroma bins
-                fb = librosa.filters.chroma(
-                    sr=sample_rate, n_fft=fft_size, n_chroma=n_bins
-                )
-
-            else:
-                raise ValueError(
-                    f"Invalid scale: {self.scale}. Must be 'mel' or 'chroma'."
-                )
-
-            self.register_buffer("fb", fb)
-
-        if scale is not None and device is not None:
-            self.fb = self.fb.to(self.device)  # move filterbank to device
-
     def stft(self, x):
         """Perform STFT.
         Args:
             x (Tensor): Input signal tensor (B, T).
 
         Returns:
-            Tensor: x_mag, x_phs
-                Magnitude and phase spectra (B, fft_size // 2 + 1, frames).
+            Tensor: x_mag
+                Magnitude spectra (B, fft_size // 2 + 1, frames).
         """
         x_stft = torch.stft(
             x,
@@ -343,53 +279,33 @@ class STFTLoss(torch.nn.Module):
             return_complex=True,
         )
         x_mag = torch.sqrt(
-            torch.clamp((x_stft.real**2) + (x_stft.imag**2), min=self.eps)
+            torch.clamp((x_stft.real**2) + (x_stft.imag**2), min=1e-6)
         )
 
         return x_mag
 
     def forward(self, input: torch.Tensor, target: torch.Tensor):
         bs, chs, seq_len = input.size()
-
-        # compute the magnitude and phase spectra of input and target
         self.window = self.window.to(input.device)
 
-        # apply A-weighting prefilter before STFT if enabled
+        # A-weighting
         if self.prefilter is not None:
-            input_f, target_f = self.prefilter(
-                input.view(-1, 1, input.size(-1)),
-                target.view(-1, 1, target.size(-1))
+            self.prefilter.to(input.device)
+            input, target = self.prefilter(
+                input.view(bs * chs, 1, seq_len),
+                target.view(bs * chs, 1, seq_len)
             )
-            input_f = input_f.squeeze(1)
-            target_f = target_f.squeeze(1)
-        else:
-            input_f = input.view(-1, input.size(-1))
-            target_f = target.view(-1, target.size(-1))
+            input  = input.view(bs, chs, seq_len)
+            target = target.view(bs, chs, seq_len)
 
-        x_mag = self.stft(input_f)
-        y_mag = self.stft(target_f)
+        # STFT
+        x_mag = self.stft(input.view(-1, seq_len))
+        y_mag = self.stft(target.view(-1, seq_len))
 
-        # apply relevant transforms
-        if self.scale is not None:
-            self.fb = self.fb.to(input.device)
-            x_mag = torch.matmul(self.fb, x_mag)
-            y_mag = torch.matmul(self.fb, y_mag)
+        # Log magnitude loss
+        log_mag_loss = self.logstft(x_mag, y_mag)
 
-        # compute loss terms
-        # SC is skipped for silent samples / mutes, log magnitude still runs
-        is_silent = target.abs().max() < 1e-6
-        sc_mag_loss = 0.0 if is_silent else (self.spectralconv(x_mag, y_mag) if self.w_sc else 0.0)
-        log_mag_loss = self.logstft(x_mag, y_mag) if self.w_log_mag else 0.0
-
-        # combine loss terms
-        loss = (
-            (self.w_sc * sc_mag_loss)
-            + (self.w_log_mag * log_mag_loss)
-        )
-
+        loss = self.w_log_mag * log_mag_loss
         loss = apply_reduction(loss, reduction=self.reduction)
 
-        if self.output == "loss":
-            return loss
-        elif self.output == "full":
-            return loss, sc_mag_loss, log_mag_loss
+        return loss

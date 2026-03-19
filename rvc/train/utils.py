@@ -395,8 +395,10 @@ def print_init_setup(
             print("    ██████  Spectral loss: Single-Scale (L1) Mel loss function")
         elif spectral_loss == "Multi-Scale Mel Loss":
             print("    ██████  Spectral loss: Multi-Scale Mel loss function")
-        elif spectral_loss == "Multi-Res STFT Loss":
-            print("    ██████  Spectral loss: Multi-Resolution STFT loss function")
+        elif spectral_loss == "Hybrid L1":
+            print("    ██████  Spectral loss: Hybrid L1 ( L1 Mel Spec + Multi-Resolution STFT loss )")
+        elif spectral_loss == "Hybrid MS":
+            print("    ██████  Spectral loss: Hybrid MS ( Multi-Scale Mel + Multi-Resolution STFT loss )")
 
         # Adversarial loss check:
         if adversarial_loss == "tprls":

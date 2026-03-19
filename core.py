@@ -2021,7 +2021,7 @@ def parse_arguments():
         "--optimizer",
         type=str,
         help="Choose an optimizer used in training.",
-        choices=["AdamW", "AdamSPD", "RAdam", "Ranger21", "DiffGrad"],
+        choices=["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"],
         default="AdamW",
     )
     train_parser.add_argument(
@@ -2164,7 +2164,7 @@ def parse_arguments():
     train_parser.add_argument(
         "--spectral_loss",
         type=str,
-        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Multi-Res STFT Loss"],
+        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1", "Hybrid MS"],
         help="Available types of spectral loss functions. ",
         default="L1 Mel Loss",
     )

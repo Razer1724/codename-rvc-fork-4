@@ -180,40 +180,22 @@ class HingeAdversarialLoss(nn.Module):
         return -torch.mean(torch.min(-x - 1, x.new_zeros(x.size())))
 
 
-class MRSTFTLoss(nn.Module):
-    def __init__(self, sample_rate: int, graduated: bool = True, perceptual_weighting: bool = True):
+class MRSTFTLoss(torch.nn.Module):
+    def __init__(self, sample_rate: int, perceptual_weighting: bool = True):
         super().__init__()
 
-        if graduated:
-            resolution_configs = [
-                (128, 20, 0.0),
-                (256, 40, 0.3),
-                (512, 80, 0.5),
-                (1024, 160, 0.7),
-                (2048, 320, 1.0),
-            ]
-        else:
-            resolution_configs = [
-                (128, 20, 1.0),
-                (256, 40, 1.0),
-                (512, 80, 1.0),
-                (1024, 160, 1.0),
-                (2048, 320, 1.0),
-            ]
-        self.losses = nn.ModuleList([
+        resolutions = [32, 64, 128, 256, 512, 1024, 2048]
+
+        self.losses = torch.nn.ModuleList([
             STFTLoss(
                 fft_size=fft_size,
                 hop_size=fft_size // 4,
                 win_length=fft_size,
                 window="hann_window",
-                w_sc=w_sc,
-                w_log_mag=1.0,
-                scale=None,
                 perceptual_weighting=perceptual_weighting,
-                n_bins=n_bins,
                 sample_rate=sample_rate,
                 log_eps=1e-5,
-            ) for fft_size, n_bins, w_sc in resolution_configs
+            ) for fft_size in resolutions
         ])
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

@@ -171,7 +171,9 @@ Smaller batch size:
 SPECTRAL_LOSS_INFO = textwrap.dedent("""\
 - **L1 Mel Loss:** L1 loss using mel spec - **Safe default.**
 - **Multi-Scale Mel Loss:** Multi-scale L1 mel spec loss.
-- **Multi-Res STFT Loss:** Multi-res. STFT spec + Spectral Convergence loss.
+- **Hybrid:** L1 or Multi-Scale Mel + Multi-res. A-Weighted log-STFT spec loss.
+
+**NOTE:** Hybrid in "L1" version is likely more stable but it varies per-case.
 """)
 
 
@@ -206,5 +208,17 @@ Once encoders loss ( kl ) reaches '0.1':
 - Freezes: Encoders, Flow, Spk emb
 - Speeds up lr decay by 50% ( Exponential lr decay only. )
 **(EXPERIMENTAL)**
-
 """)
+
+
+OPTIMIZER_INFO = textwrap.dedent("""\
+Choose an optimizer used in training:
+( If unsure, just leave it as it is or try these in this order: AdamW -> AdaBelief -> RAdam. )
+
+- **AdamW:** Default; Safe and reliable.
+- **AdaBelief:** Adapts step size by "belief" in the gradient direction. ( **Likely more stable than AdamW in GANs** )
+- **RAdam:** Rectified Adam. ( **Can help** with early instability - **Most likely slower convergence** )
+- **DiffGrad:** An optimizer with CNN in mind. ( **Probs** a good AdamW alternative - **For finetuning** )
+- **Ranger21:** AdamW + LookAhead and few more extras. ( **Most likely unstable** )
+""")
+

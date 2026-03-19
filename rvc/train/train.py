@@ -161,7 +161,7 @@ use_lr_scheduler = lr_scheduler != "none"
 # Globals ( tweakable~ )
 enable_persistent_workers = True
 
-c_stft = 25 # Aligned with Mel losses (l1, multi-scale);  26.5 for sc 1.0 + mel scale,  25 for graduated sc + Perceptual weighting
+c_stft = 0.0 # Unused for now.
 
 pretrain_preview = True
 pretrain_preview_interval = 100 # Measured in steps.
@@ -184,6 +184,36 @@ custom_sid = 1
 
 import logging
 logging.getLogger("torch").setLevel(logging.ERROR)
+
+
+_spectral_loss_buffer = []
+_STABILITY_WINDOW = 30
+_STABILITY_CHECK_EVERY = 10  # check every 10 steps
+
+def check_loss_stability(value: float, step: int) -> None:
+    _spectral_loss_buffer.append(value)
+    if len(_spectral_loss_buffer) > 100:
+        _spectral_loss_buffer.pop(0)
+
+    if len(_spectral_loss_buffer) >= _STABILITY_WINDOW and step % _STABILITY_CHECK_EVERY == 0:
+        window = np.array(_spectral_loss_buffer[-_STABILITY_WINDOW:])
+        median = np.median(window)
+        std = np.std(window)
+        window = window[np.abs(window - median) < 3 * std]
+        if len(window) < 5:
+            return
+        cv = np.std(window) / (np.mean(window) + 1e-8)
+        mid = len(window) // 2
+        decline = (np.mean(window[:mid]) - np.mean(window[mid:])) / (np.mean(window[:mid]) + 1e-8) * 100
+        if cv < 0.05 and abs(decline) < 1.0:
+            status = "STABLE ✓ — safe to calibrate now"
+        elif cv < 0.10 and abs(decline) < 3.0:
+            status = "PROBABLY STABLE — run ~20 more steps to confirm"
+        elif decline > 3.0:
+            status = f"STILL DECLINING ({decline:.1f}%) — keep measuring"
+        else:
+            status = f"NOISY (CV={cv:.3f}) — keep measuring"
+        print(f"[STABILITY step={step}] {status}")
 
 class NullDiscriminator(nn.Module):
     def __init__(self):
@@ -393,6 +423,26 @@ def get_optimizers(
         decoupled_weight_decay=True,
         foreach=True,
     )
+    adabelief_args_g = dict(
+        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
+        betas=(0.8, 0.999),
+        eps=1e-16,
+        weight_decay=0.01,
+        weight_decouple=True,
+        rectify=True,
+        adamc=False,
+        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate, # only used when adamc is enabled
+    )
+    adabelief_args_d = dict(
+        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
+        betas=(0.8, 0.999),
+        eps=1e-16,
+        weight_decay=0.01,
+        weight_decouple=True,
+        rectify=True,
+        adamc=False,
+        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate, # only used when adamc is enabled
+    )
     # For exotic optimizers
     ranger_args = dict(
         num_epochs=total_epoch_count,
@@ -431,28 +481,10 @@ def get_optimizers(
         optim_g = Ranger21(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g, **ranger_args)
         optim_d = Ranger21(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d, **ranger_args)
 
-    elif optimizer_choice == "AdamSPD":
-        import copy
-        from rvc.train.custom_optimizers.adamspd import AdamSPD
-
-        # Get trainable parameters and cache the pre-trained weights
-        params_to_opt_g = [p for p in net_g.parameters() if p.requires_grad]
-        params_anchor_g = copy.deepcopy(params_to_opt_g) 
-        # Parameter group with the anchor
-        param_group_g = [{'params': params_to_opt_g, 'pre': params_anchor_g}]
-
-        # Get trainable parameters and cache the pre-trained weights
-        params_to_opt_d = [p for p in net_d.parameters() if p.requires_grad]
-        params_anchor_d = copy.deepcopy(params_to_opt_d) 
-        # Parameter group with the anchor
-        param_group_d = [{'params': params_to_opt_d, 'pre': params_anchor_d}]
-
-        optim_g = AdamSPD(param_group_g, **adamwspd_args_g)
-        optim_d = AdamSPD(param_group_d, **adamwspd_args_d,)
-
-        proj_strength_mult_g = adamwspd_args_g['weight_decay']
-        proj_strength_mult_d = adamwspd_args_d['weight_decay']
-        print(f"    ██████  Proj. Strength Mult. for AdamSPD: G; {proj_strength_mult_g}, D; {proj_strength_mult_d}")
+    elif optimizer_choice == "AdaBelief":
+        from rvc.train.custom_optimizers.adabelief import AdaBelief
+        optim_g = AdaBelief(filter(lambda p: p.requires_grad, net_g.parameters()), **common_args_g)
+        optim_d = AdaBelief(filter(lambda p: p.requires_grad, net_d.parameters()), **common_args_d)
     else:
         raise ValueError(f"Unknown optimizer choice: {optimizer_choice}")
     return optim_g, optim_d
@@ -801,12 +833,18 @@ def run(
     config.model.spk_embed_dim = spk_dim
 
     # Spectral loss init
+    fn_spectral_loss2 = None
+
     if spectral_loss == "L1 Mel Loss":
         fn_spectral_loss = torch.nn.L1Loss()
     elif spectral_loss == "Multi-Scale Mel Loss":
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
-    elif spectral_loss == "Multi-Res STFT Loss":
-        fn_spectral_loss = MRSTFTLoss(sample_rate=sample_rate, graduated=True, perceptual_weighting=True)
+    elif spectral_loss == "Hybrid L1":
+        fn_spectral_loss = torch.nn.L1Loss()
+        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, perceptual_weighting=True)
+    elif spectral_loss == "Hybrid MS":
+        fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
+        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, perceptual_weighting=True)
     else:
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)
@@ -914,6 +952,7 @@ def run(
             n_gpus,
             gradscaler,
             fn_hinge_loss,
+            fn_spectral_loss2,
             hann_window,
             stopper=stopper,
             trajectory_tracker=trajectory_tracker
@@ -964,6 +1003,7 @@ def training_loop(
     n_gpus,
     gradscaler,
     fn_hinge_loss=None,
+    fn_spectral_loss2=None,
     hann_window=None,
     stopper=None,
     trajectory_tracker=None
@@ -987,6 +1027,7 @@ def training_loop(
         device (torch.device): The device to use for training (CPU or GPU).
         reference (list): Contains reference sample. Either custom or from train loader.
         fn_spectral_loss: spectral loss;  can be l1, multi-scale or ms-stft.
+        fn_spectral_loss2: 2nd spectral loss
         gradscaler: gradscaler for fp16
         hann_window: hann window used for RingFormer
     """
@@ -1037,7 +1078,7 @@ def training_loop(
         "loss_adv": deque(maxlen=rolling_loss_steps),
         "loss_gen_total": deque(maxlen=rolling_loss_steps),
         "loss_fm": deque(maxlen=rolling_loss_steps),
-        "loss_mel": deque(maxlen=rolling_loss_steps),
+        "loss_spectral": deque(maxlen=rolling_loss_steps),
         "loss_kl": deque(maxlen=rolling_loss_steps),
     }
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
@@ -1151,15 +1192,31 @@ def training_loop(
             # Compute generator losses:
             with autocast(device_type="cuda", enabled=False):
 
-                # Spectral loss ( In code kept referenced as "loss_mel" to avoid confusion in old logs / graphs):
+                # Spectral loss
                 if spectral_loss == "L1 Mel Loss":
                     y_mel = wave_to_mel(config, y, half=train_dtype)
                     y_hat_mel = wave_to_mel(config, y_hat, half=train_dtype)
-                    loss_mel = fn_spectral_loss(y_mel, y_hat_mel) * config.train.c_mel
+                    loss_spectral = fn_spectral_loss(y_mel, y_hat_mel) * config.train.c_mel
                 elif spectral_loss == "Multi-Scale Mel Loss":
-                    loss_mel = fn_spectral_loss(y, y_hat) * config.train.c_mel / 3.0
-                elif spectral_loss == "Multi-Res STFT Loss":
-                    loss_mel = fn_spectral_loss(y_hat.float(), y.float()) * c_stft
+                    loss_spectral = fn_spectral_loss(y, y_hat) * ( config.train.c_mel / 3.0 + 1 ) # * 16
+                elif spectral_loss == "Hybrid L1":
+                    # L1 Mel
+                    y_mel = wave_to_mel(config, y, half=train_dtype)
+                    y_hat_mel = wave_to_mel(config, y_hat, half=train_dtype)
+                    loss_l1_mel = fn_spectral_loss(y_mel, y_hat_mel) * config.train.c_mel # * 45
+                    # MR-STFT
+                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * 53
+                    # Loss
+                    loss_spectral = loss_l1_mel * 0.70 + loss_mrstft * 0.30
+                elif spectral_loss == "Hybrid MS":
+                    # Multi-Scale el L1
+                    loss_ms_mel = fn_spectral_loss(y, y_hat) * ( config.train.c_mel / 3.0 + 1 ) # * 16
+                    # MR-STFT
+                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * 52
+                    # Loss
+                    loss_spectral = loss_ms_mel * 0.70 + loss_mrstft * 0.30
+
+
 
                 # Feature Matching loss
                 loss_fm = feature_loss(fmap_r, fmap_g)
@@ -1190,15 +1247,15 @@ def training_loop(
                 if not training_loop.encoders_frozen: # For when encoders aren't frozen yet
                     loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl # KL ( Kullback–Leibler divergence ) loss
                     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                        loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta + loss_sd
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta + loss_sd
                     else:
-                        loss_gen_total = loss_adv + loss_fm + loss_mel + loss_kl * kl_beta
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
                 else:
                     loss_kl = torch.tensor(0.0, device=device) # KL loss dummy for logs
                     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                        loss_gen_total = loss_adv + loss_fm + loss_mel + loss_sd
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_sd
                     else:
-                        loss_gen_total = loss_adv + loss_fm + loss_mel
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral
 
             # Generator backward and update:
             optim_g.zero_grad(set_to_none=True)
@@ -1227,7 +1284,7 @@ def training_loop(
                 epoch_loss_tensor[1].add_(loss_adv.detach())
                 epoch_loss_tensor[2].add_(loss_gen_total.detach())
                 epoch_loss_tensor[3].add_(loss_fm.detach())
-                epoch_loss_tensor[4].add_(loss_mel.detach())
+                epoch_loss_tensor[4].add_(loss_spectral.detach())
                 epoch_loss_tensor[5].add_(loss_kl.detach())
 
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
@@ -1250,7 +1307,7 @@ def training_loop(
             avg_rolling_cache["loss_adv"].append(loss_adv.detach()) 
             avg_rolling_cache["loss_gen_total"].append(loss_gen_total.detach())
             avg_rolling_cache["loss_fm"].append(loss_fm.detach())
-            avg_rolling_cache["loss_mel"].append(loss_mel.detach())
+            avg_rolling_cache["loss_spectral"].append(loss_spectral.detach())
             avg_rolling_cache["loss_kl"].append(loss_kl.detach())
             if "loss_sd" in avg_rolling_cache:
                 avg_rolling_cache["loss_sd"].append(loss_sd.detach())
@@ -1393,7 +1450,7 @@ def training_loop(
             "loss_avg/loss_adv": avg_epoch_loss[1].item(),
             "loss_avg/loss_gen_total": avg_epoch_loss[2].item(),
             "loss_avg/loss_fm": avg_epoch_loss[3].item(),
-            "loss_avg/loss_mel": avg_epoch_loss[4].item(),
+            "loss_avg/loss_spectral": avg_epoch_loss[4].item(),
             "loss_avg/loss_kl": avg_epoch_loss[5].item(),
             "learning_rate/lr_d": lr_d,
             "learning_rate/lr_g": lr_g,
