@@ -330,6 +330,168 @@ def run_batch_infer_script(
     return f"Files from {input_folder} inferred successfully."
 
 
+# Multi-model infer (one audio, multiple models)
+def run_multi_model_infer_script(
+    pitch: int,
+    filter_radius: int,
+    index_rate: float,
+    volume_envelope: int,
+    protect: float,
+    f0_method: str,
+    input_path: str,
+    output_folder: str,
+    model_paths: list,
+    split_audio: bool,
+    f0_autotune: bool,
+    f0_autotune_strength: float,
+    clean_audio: bool,
+    clean_strength: float,
+    export_format: str,
+    f0_file: str,
+    embedder_model: str,
+    embedder_model_custom: str = None,
+    formant_shifting: bool = False,
+    formant_qfrency: float = 1.0,
+    formant_timbre: float = 1.0,
+    post_process: bool = False,
+    reverb: bool = False,
+    pitch_shift: bool = False,
+    limiter: bool = False,
+    gain: bool = False,
+    distortion: bool = False,
+    chorus: bool = False,
+    bitcrush: bool = False,
+    clipping: bool = False,
+    compressor: bool = False,
+    delay: bool = False,
+    reverb_room_size: float = 0.5,
+    reverb_damping: float = 0.5,
+    reverb_wet_gain: float = 0.5,
+    reverb_dry_gain: float = 0.5,
+    reverb_width: float = 0.5,
+    reverb_freeze_mode: float = 0.5,
+    pitch_shift_semitones: float = 0.0,
+    limiter_threshold: float = -6,
+    limiter_release_time: float = 0.01,
+    gain_db: float = 0.0,
+    distortion_gain: float = 25,
+    chorus_rate: float = 1.0,
+    chorus_depth: float = 0.25,
+    chorus_center_delay: float = 7,
+    chorus_feedback: float = 0.0,
+    chorus_mix: float = 0.5,
+    bitcrush_bit_depth: int = 8,
+    clipping_threshold: float = -6,
+    compressor_threshold: float = 0,
+    compressor_ratio: float = 1,
+    compressor_attack: float = 1.0,
+    compressor_release: float = 100,
+    delay_seconds: float = 0.5,
+    delay_feedback: float = 0.0,
+    delay_mix: float = 0.5,
+    sid: int = 0,
+    seed: int = 0,
+):
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Accept either a list (Gradio) or comma-separated string (CLI)
+    if isinstance(model_paths, str):
+        model_paths = [p.strip() for p in model_paths.split(",") if p.strip()]
+
+    model_files = [p for p in (model_paths or []) if p and os.path.isfile(p)]
+    if not model_files:
+        return "No valid model files selected. Please select at least one model."
+
+    audio_stem = os.path.splitext(os.path.basename(input_path))[0]
+    fmt = export_format.lower()
+    results = []
+
+    for pth_path in model_files:
+        model_name = os.path.splitext(os.path.basename(pth_path))[0]
+
+        model_dir = os.path.dirname(pth_path)
+        index_candidates = [
+            f for f in os.listdir(model_dir) if f.endswith(".index") and "trained" not in f
+        ]
+        index_path = ""
+        if index_candidates:
+            core = model_name.split("_")[0].lower()
+            matched = [f for f in index_candidates if core in f.lower()]
+            index_path = os.path.join(model_dir, matched[0] if matched else index_candidates[0])
+
+        output_path = os.path.join(output_folder, f"{model_name}_{audio_stem}_output.wav")
+
+        try:
+            run_infer_script(
+                pitch=pitch,
+                filter_radius=filter_radius,
+                index_rate=index_rate,
+                volume_envelope=volume_envelope,
+                protect=protect,
+                f0_method=f0_method,
+                input_path=input_path,
+                output_path=output_path,
+                pth_path=pth_path,
+                index_path=index_path,
+                split_audio=split_audio,
+                f0_autotune=f0_autotune,
+                f0_autotune_strength=f0_autotune_strength,
+                clean_audio=clean_audio,
+                clean_strength=clean_strength,
+                export_format=export_format,
+                f0_file=f0_file,
+                embedder_model=embedder_model,
+                embedder_model_custom=embedder_model_custom,
+                formant_shifting=formant_shifting,
+                formant_qfrency=formant_qfrency,
+                formant_timbre=formant_timbre,
+                post_process=post_process,
+                reverb=reverb,
+                pitch_shift=pitch_shift,
+                limiter=limiter,
+                gain=gain,
+                distortion=distortion,
+                chorus=chorus,
+                bitcrush=bitcrush,
+                clipping=clipping,
+                compressor=compressor,
+                delay=delay,
+                reverb_room_size=reverb_room_size,
+                reverb_damping=reverb_damping,
+                reverb_wet_gain=reverb_wet_gain,
+                reverb_dry_gain=reverb_dry_gain,
+                reverb_width=reverb_width,
+                reverb_freeze_mode=reverb_freeze_mode,
+                pitch_shift_semitones=pitch_shift_semitones,
+                limiter_threshold=limiter_threshold,
+                limiter_release_time=limiter_release_time,
+                gain_db=gain_db,
+                distortion_gain=distortion_gain,
+                chorus_rate=chorus_rate,
+                chorus_depth=chorus_depth,
+                chorus_center_delay=chorus_center_delay,
+                chorus_feedback=chorus_feedback,
+                chorus_mix=chorus_mix,
+                bitcrush_bit_depth=bitcrush_bit_depth,
+                clipping_threshold=clipping_threshold,
+                compressor_threshold=compressor_threshold,
+                compressor_ratio=compressor_ratio,
+                compressor_attack=compressor_attack,
+                compressor_release=compressor_release,
+                delay_seconds=delay_seconds,
+                delay_feedback=delay_feedback,
+                delay_mix=delay_mix,
+                sid=sid,
+                seed=seed,
+            )
+            results.append(f"[OK] {model_name}")
+        except Exception as e:
+            results.append(f"[FAIL] {model_name}: {e}")
+
+    summary = "\n".join(results)
+    return f"Multi-model inference complete for '{os.path.basename(input_path)}':\n{summary}"
+
+
 # TTS
 def run_tts_script(
     tts_file: str,
@@ -1675,6 +1837,156 @@ def parse_arguments():
         default=0.5,
     )
 
+    # Parser for 'multi_model_infer' mode
+    multi_model_infer_parser = subparsers.add_parser(
+        "multi_model_infer",
+        help="Run inference on a single audio file using multiple models.",
+    )
+    multi_model_infer_parser.add_argument(
+        "--pitch", type=int, help=pitch_description, choices=range(-24, 25), default=0,
+    )
+    multi_model_infer_parser.add_argument(
+        "--filter_radius", type=int, help=filter_radius_description, choices=range(11), default=3,
+    )
+    multi_model_infer_parser.add_argument(
+        "--index_rate", type=float, help=index_rate_description,
+        choices=[i / 100.0 for i in range(0, 101)], default=0.3,
+    )
+    multi_model_infer_parser.add_argument(
+        "--volume_envelope", type=float, help=volume_envelope_description,
+        choices=[i / 100.0 for i in range(0, 101)], default=1,
+    )
+    multi_model_infer_parser.add_argument(
+        "--protect", type=float, help=protect_description,
+        choices=[i / 1000.0 for i in range(0, 501)], default=0.33,
+    )
+    multi_model_infer_parser.add_argument(
+        "--f0_method", type=str, help=f0_method_description,
+        choices=["crepe", "crepe-tiny", "rmvpe", "fcpe"], default="rmvpe",
+    )
+    multi_model_infer_parser.add_argument(
+        "--input_path", type=str,
+        help="Path to the single input audio file.", required=True,
+    )
+    multi_model_infer_parser.add_argument(
+        "--output_folder", type=str,
+        help="Path to the folder where per-model output files will be saved.", required=True,
+    )
+    multi_model_infer_parser.add_argument(
+        "--model_paths", type=str, nargs="+",
+        help="One or more paths to .pth / .uvmp model files to run the audio through.", required=True,
+    )
+    multi_model_infer_parser.add_argument(
+        "--split_audio", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=split_audio_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--f0_autotune", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=f0_autotune_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--f0_autotune_strength", type=float,
+        choices=[(i / 10) for i in range(11)], default=1.0,
+    )
+    multi_model_infer_parser.add_argument(
+        "--clean_audio", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=clean_audio_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--clean_strength", type=float,
+        choices=[(i / 10) for i in range(11)], default=0.7,
+    )
+    multi_model_infer_parser.add_argument(
+        "--export_format", type=str, help=export_format_description,
+        choices=["WAV", "MP3", "FLAC", "OGG", "M4A"], default="WAV",
+    )
+    multi_model_infer_parser.add_argument(
+        "--embedder_model", type=str, help=embedder_model_description,
+        choices=["contentvec", "spin_v1", "spin_v2", "custom"],
+        default="contentvec",
+    )
+    multi_model_infer_parser.add_argument(
+        "--embedder_model_custom", type=str, help=embedder_model_custom_description, default=None,
+    )
+    multi_model_infer_parser.add_argument("--f0_file", type=str, help=f0_file_description, default=None)
+    multi_model_infer_parser.add_argument(
+        "--formant_shifting", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=formant_shifting_description, default=False,
+    )
+    multi_model_infer_parser.add_argument("--formant_qfrency", type=float, default=1.0)
+    multi_model_infer_parser.add_argument("--formant_timbre", type=float, default=1.0)
+    multi_model_infer_parser.add_argument(
+        "--post_process", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=post_process_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--reverb", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=reverb_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--pitch_shift", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=pitch_shift_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--limiter", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=limiter_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--gain", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=gain_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--distortion", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=distortion_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--chorus", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=chorus_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--bitcrush", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=bitcrush_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--clipping", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=clipping_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--compressor", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=compressor_description, default=False,
+    )
+    multi_model_infer_parser.add_argument(
+        "--delay", type=lambda x: bool(strtobool(x)), choices=[True, False],
+        help=delay_description, default=False,
+    )
+    multi_model_infer_parser.add_argument("--reverb_room_size", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--reverb_damping", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--reverb_wet_gain", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--reverb_dry_gain", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--reverb_width", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--reverb_freeze_mode", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--pitch_shift_semitones", type=float, default=0.0)
+    multi_model_infer_parser.add_argument("--limiter_threshold", type=float, default=-6)
+    multi_model_infer_parser.add_argument("--limiter_release_time", type=float, default=0.01)
+    multi_model_infer_parser.add_argument("--gain_db", type=float, default=0.0)
+    multi_model_infer_parser.add_argument("--distortion_gain", type=float, default=25)
+    multi_model_infer_parser.add_argument("--chorus_rate", type=float, default=1.0)
+    multi_model_infer_parser.add_argument("--chorus_depth", type=float, default=0.25)
+    multi_model_infer_parser.add_argument("--chorus_center_delay", type=float, default=7)
+    multi_model_infer_parser.add_argument("--chorus_feedback", type=float, default=0.0)
+    multi_model_infer_parser.add_argument("--chorus_mix", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--bitcrush_bit_depth", type=int, default=8)
+    multi_model_infer_parser.add_argument("--clipping_threshold", type=float, default=-6)
+    multi_model_infer_parser.add_argument("--compressor_threshold", type=float, default=0)
+    multi_model_infer_parser.add_argument("--compressor_ratio", type=float, default=1)
+    multi_model_infer_parser.add_argument("--compressor_attack", type=float, default=1.0)
+    multi_model_infer_parser.add_argument("--compressor_release", type=float, default=100)
+    multi_model_infer_parser.add_argument("--delay_seconds", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--delay_feedback", type=float, default=0.0)
+    multi_model_infer_parser.add_argument("--delay_mix", type=float, default=0.5)
+    multi_model_infer_parser.add_argument("--sid", type=int, help=sid_description, default=0)
+    multi_model_infer_parser.add_argument("--seed", type=int, default=0)
+
     # Parser for 'tts' mode
     tts_parser = subparsers.add_parser("tts", help="Run TTS inference")
     tts_parser.add_argument(
@@ -2511,6 +2823,68 @@ def main():
                 delay_feedback=args.delay_feedback,
                 delay_mix=args.delay_mix,
                 sid=args.sid,
+            )
+        elif args.mode == "multi_model_infer":
+            run_multi_model_infer_script(
+                pitch=args.pitch,
+                filter_radius=args.filter_radius,
+                index_rate=args.index_rate,
+                volume_envelope=args.volume_envelope,
+                protect=args.protect,
+                f0_method=args.f0_method,
+                input_path=args.input_path,
+                output_folder=args.output_folder,
+                model_paths=args.model_paths,
+                split_audio=args.split_audio,
+                f0_autotune=args.f0_autotune,
+                f0_autotune_strength=args.f0_autotune_strength,
+                clean_audio=args.clean_audio,
+                clean_strength=args.clean_strength,
+                export_format=args.export_format,
+                f0_file=args.f0_file,
+                embedder_model=args.embedder_model,
+                embedder_model_custom=args.embedder_model_custom,
+                formant_shifting=args.formant_shifting,
+                formant_qfrency=args.formant_qfrency,
+                formant_timbre=args.formant_timbre,
+                post_process=args.post_process,
+                reverb=args.reverb,
+                pitch_shift=args.pitch_shift,
+                limiter=args.limiter,
+                gain=args.gain,
+                distortion=args.distortion,
+                chorus=args.chorus,
+                bitcrush=args.bitcrush,
+                clipping=args.clipping,
+                compressor=args.compressor,
+                delay=args.delay,
+                reverb_room_size=args.reverb_room_size,
+                reverb_damping=args.reverb_damping,
+                reverb_wet_gain=args.reverb_wet_gain,
+                reverb_dry_gain=args.reverb_dry_gain,
+                reverb_width=args.reverb_width,
+                reverb_freeze_mode=args.reverb_freeze_mode,
+                pitch_shift_semitones=args.pitch_shift_semitones,
+                limiter_threshold=args.limiter_threshold,
+                limiter_release_time=args.limiter_release_time,
+                gain_db=args.gain_db,
+                distortion_gain=args.distortion_gain,
+                chorus_rate=args.chorus_rate,
+                chorus_depth=args.chorus_depth,
+                chorus_center_delay=args.chorus_center_delay,
+                chorus_feedback=args.chorus_feedback,
+                chorus_mix=args.chorus_mix,
+                bitcrush_bit_depth=args.bitcrush_bit_depth,
+                clipping_threshold=args.clipping_threshold,
+                compressor_threshold=args.compressor_threshold,
+                compressor_ratio=args.compressor_ratio,
+                compressor_attack=args.compressor_attack,
+                compressor_release=args.compressor_release,
+                delay_seconds=args.delay_seconds,
+                delay_feedback=args.delay_feedback,
+                delay_mix=args.delay_mix,
+                sid=args.sid,
+                seed=args.seed,
             )
         elif args.mode == "tts":
             run_tts_script(
