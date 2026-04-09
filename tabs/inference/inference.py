@@ -652,12 +652,59 @@ def inference_tab():
             speakers = get_speakers_id(model_path, sub_model_name)
             speaker_val = speakers[0] if speakers else 0
             return gr.update(choices=speakers, value=speaker_val)
-
             
         def sync_speaker_id(model_path, repurposed_index_value):
             if model_path and model_path.endswith(".uvmp"):
                 return gr.update(value=repurposed_index_value)
             return gr.update()
+
+        def on_multi_model_change(model_paths):
+            if not model_paths:
+                return (
+                    gr.update(visible=False, choices=[], value=[]),
+                    gr.update(choices=[0], value=0)
+                )
+            uvmp_models = []
+            for mp in model_paths:
+                if mp and mp.endswith(".uvmp"):
+                    uvmp_models.extend(get_uvmp_models(mp))
+            
+            uvmp_models = sorted(list(set(uvmp_models)))
+            
+            first_model = model_paths[0]
+            if first_model.endswith(".uvmp"):
+                speakers = get_speakers_id(first_model, uvmp_models[0] if uvmp_models else None)
+            else:
+                speakers = get_speakers_id(first_model)
+                
+            speaker_val = speakers[0] if speakers else 0
+            
+            if uvmp_models:
+                return (
+                    gr.update(visible=True, choices=uvmp_models, value=[uvmp_models[0]] if uvmp_models else []),
+                    gr.update(choices=speakers, value=speaker_val)
+                )
+            else:
+                return (
+                    gr.update(visible=False, choices=[], value=[]),
+                    gr.update(choices=speakers, value=speaker_val)
+                )
+
+        def on_multi_submodel_change(model_paths, sub_model_name):
+            if not model_paths or not sub_model_name:
+                return gr.update(choices=[0], value=0)
+            
+            first_uvmp = next((mp for mp in model_paths if mp.endswith(".uvmp")), None)
+            
+            first_submodel = sub_model_name[0] if isinstance(sub_model_name, list) and len(sub_model_name) > 0 else (sub_model_name if isinstance(sub_model_name, str) else None)
+            
+            if first_uvmp and first_submodel:
+                speakers = get_speakers_id(first_uvmp, first_submodel)
+            else:
+                speakers = [0]
+                
+            speaker_val = speakers[0] if speakers else 0
+            return gr.update(choices=speakers, value=speaker_val)
 
     # Holds: { "audio_name": "<stem of the audio filename>",
     # "f0_json": "<JSON string from extract_f0_for_editor>" }
@@ -1318,7 +1365,7 @@ def inference_tab():
             split_audio, autotune, autotune_strength,
             clean_audio, clean_strength, export_format, f0_file,
             embedder_model, embedder_model_custom,
-            sid, seed,
+            sid, seed, uvmp_submodel=None,
         ):
             if not terms_accepted:
                 message = "You must agree to the Terms of Use to proceed."
@@ -1345,6 +1392,7 @@ def inference_tab():
                 embedder_model_custom=embedder_model_custom,
                 sid=sid,
                 seed=seed,
+                uvmp_submodel=uvmp_submodel,
             )
 
         terms_checkbox = gr.Checkbox(
@@ -1954,6 +2002,15 @@ def inference_tab():
                     interactive=True,
                     allow_custom_value=True,
                 )
+                uvmp_submodel_multi = gr.Dropdown(
+                    label="UVMP Sub-Model(s)",
+                    info="Select one or more sub-models from the UVMP bundle.",
+                    choices=[],
+                    value=[],
+                    multiselect=True,
+                    interactive=True,
+                    visible=False
+                )
                 output_folder_multi = gr.Textbox(
                     label="Output Folder",
                     info="Folder where per-model output audio files will be saved (named <audio>_<model>.ext).",
@@ -2181,6 +2238,17 @@ def inference_tab():
         inputs=[model_file, index_file],
         outputs=[sid],
     )
+    model_files_multi.change(
+        fn=on_multi_model_change,
+        inputs=[model_files_multi],
+        outputs=[uvmp_submodel_multi, sid_multi]
+    )
+    uvmp_submodel_multi.change(
+        fn=on_multi_submodel_change,
+        inputs=[model_files_multi, uvmp_submodel_multi],
+        outputs=[sid_multi]
+    )
+
     autotune.change(
         fn=toggle_visible,
         inputs=[autotune],
@@ -2629,6 +2697,7 @@ def inference_tab():
             delay_mix_batch,
             sid_batch,
             seed,
+            uvmp_submodel,
         ],
         outputs=[vc_output3],
     )
@@ -2697,6 +2766,7 @@ def inference_tab():
             embedder_model_custom_multi,
             sid_multi,
             seed_multi,
+            uvmp_submodel_multi,
         ],
         outputs=[vc_output_multi],
     )
