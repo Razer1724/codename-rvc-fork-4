@@ -257,6 +257,7 @@ def run_batch_infer_script(
     delay_mix: float = 0.5,
     sid: int = 0,
     seed: int = 0,
+    uvmp_submodel: str = None,
 ):
     kwargs = {
         "audio_input_paths": input_folder,
@@ -321,6 +322,7 @@ def run_batch_infer_script(
         "delay_mix": delay_mix,
         "sid": sid,
         "seed": seed,
+        "uvmp_submodel": uvmp_submodel,
     }
     infer_pipeline = import_voice_converter()
     infer_pipeline.convert_audio_batch(
@@ -391,10 +393,10 @@ def run_multi_model_infer_script(
     delay_mix: float = 0.5,
     sid: int = 0,
     seed: int = 0,
+    uvmp_submodel=None,
 ):
     os.makedirs(output_folder, exist_ok=True)
 
-    # Accept either a list (Gradio) or comma-separated string (CLI)
     if isinstance(model_paths, str):
         model_paths = [p.strip() for p in model_paths.split(",") if p.strip()]
 
@@ -402,9 +404,33 @@ def run_multi_model_infer_script(
     if not model_files:
         return "No valid model files selected. Please select at least one model."
 
+    if isinstance(uvmp_submodel, str):
+        submodels_list = [s.strip() for s in uvmp_submodel.split(",") if s.strip()]
+    elif isinstance(uvmp_submodel, list):
+        submodels_list = uvmp_submodel
+    else:
+        submodels_list = []
+
     audio_stem = os.path.splitext(os.path.basename(input_path))[0]
     fmt = export_format.lower()
     results = []
+
+    def _get_uvmp_keys(path):
+        try:
+            import io as _io
+            import torch as _torch
+            import zstandard as _zstd
+            with open(path, "rb") as f_comp:
+                dctx = _zstd.ZstdDecompressor()
+                with dctx.stream_reader(f_comp) as reader:
+                    data = reader.read()
+            buf = _io.BytesIO(data)
+            model_data = _torch.load(buf, map_location="cpu", weights_only=False)
+            if "models" in model_data:
+                return set(model_data["models"].keys())
+        except Exception:
+            pass
+        return set()
 
     for pth_path in model_files:
         model_name = os.path.splitext(os.path.basename(pth_path))[0]
@@ -419,74 +445,89 @@ def run_multi_model_infer_script(
             matched = [f for f in index_candidates if core in f.lower()]
             index_path = os.path.join(model_dir, matched[0] if matched else index_candidates[0])
 
-        output_path = os.path.join(output_folder, f"{model_name}_{audio_stem}_output.wav")
+        is_uvmp = pth_path.endswith(".uvmp")
+        if is_uvmp and submodels_list:
+            valid_keys = _get_uvmp_keys(pth_path)
+            matched_submodels = [s for s in submodels_list if s in valid_keys]
+            current_submodels = matched_submodels if matched_submodels else [None]
+        else:
+            current_submodels = [None]
 
-        try:
-            run_infer_script(
-                pitch=pitch,
-                filter_radius=filter_radius,
-                index_rate=index_rate,
-                volume_envelope=volume_envelope,
-                protect=protect,
-                f0_method=f0_method,
-                input_path=input_path,
-                output_path=output_path,
-                pth_path=pth_path,
-                index_path=index_path,
-                split_audio=split_audio,
-                f0_autotune=f0_autotune,
-                f0_autotune_strength=f0_autotune_strength,
-                clean_audio=clean_audio,
-                clean_strength=clean_strength,
-                export_format=export_format,
-                f0_file=f0_file,
-                embedder_model=embedder_model,
-                embedder_model_custom=embedder_model_custom,
-                formant_shifting=formant_shifting,
-                formant_qfrency=formant_qfrency,
-                formant_timbre=formant_timbre,
-                post_process=post_process,
-                reverb=reverb,
-                pitch_shift=pitch_shift,
-                limiter=limiter,
-                gain=gain,
-                distortion=distortion,
-                chorus=chorus,
-                bitcrush=bitcrush,
-                clipping=clipping,
-                compressor=compressor,
-                delay=delay,
-                reverb_room_size=reverb_room_size,
-                reverb_damping=reverb_damping,
-                reverb_wet_gain=reverb_wet_gain,
-                reverb_dry_gain=reverb_dry_gain,
-                reverb_width=reverb_width,
-                reverb_freeze_mode=reverb_freeze_mode,
-                pitch_shift_semitones=pitch_shift_semitones,
-                limiter_threshold=limiter_threshold,
-                limiter_release_time=limiter_release_time,
-                gain_db=gain_db,
-                distortion_gain=distortion_gain,
-                chorus_rate=chorus_rate,
-                chorus_depth=chorus_depth,
-                chorus_center_delay=chorus_center_delay,
-                chorus_feedback=chorus_feedback,
-                chorus_mix=chorus_mix,
-                bitcrush_bit_depth=bitcrush_bit_depth,
-                clipping_threshold=clipping_threshold,
-                compressor_threshold=compressor_threshold,
-                compressor_ratio=compressor_ratio,
-                compressor_attack=compressor_attack,
-                compressor_release=compressor_release,
-                delay_seconds=delay_seconds,
-                delay_feedback=delay_feedback,
-                delay_mix=delay_mix,
-                sid=sid,
-                seed=seed,
-            )
-            results.append(f"[OK] {model_name}")
-        except Exception as e:
-            results.append(f"[FAIL] {model_name}: {e}")
+        for sub_name in current_submodels:
+            if sub_name:
+                output_path = os.path.join(output_folder, f"{model_name}_{sub_name}_{audio_stem}_output.wav")
+                display_name = f"{model_name} ({sub_name})"
+            else:
+                output_path = os.path.join(output_folder, f"{model_name}_{audio_stem}_output.wav")
+                display_name = model_name
+
+            try:
+                run_infer_script(
+                    pitch=pitch,
+                    filter_radius=filter_radius,
+                    index_rate=index_rate,
+                    volume_envelope=volume_envelope,
+                    protect=protect,
+                    f0_method=f0_method,
+                    input_path=input_path,
+                    output_path=output_path,
+                    pth_path=pth_path,
+                    index_path=index_path,
+                    split_audio=split_audio,
+                    f0_autotune=f0_autotune,
+                    f0_autotune_strength=f0_autotune_strength,
+                    clean_audio=clean_audio,
+                    clean_strength=clean_strength,
+                    export_format=export_format,
+                    f0_file=f0_file,
+                    embedder_model=embedder_model,
+                    embedder_model_custom=embedder_model_custom,
+                    formant_shifting=formant_shifting,
+                    formant_qfrency=formant_qfrency,
+                    formant_timbre=formant_timbre,
+                    post_process=post_process,
+                    reverb=reverb,
+                    pitch_shift=pitch_shift,
+                    limiter=limiter,
+                    gain=gain,
+                    distortion=distortion,
+                    chorus=chorus,
+                    bitcrush=bitcrush,
+                    clipping=clipping,
+                    compressor=compressor,
+                    delay=delay,
+                    reverb_room_size=reverb_room_size,
+                    reverb_damping=reverb_damping,
+                    reverb_wet_gain=reverb_wet_gain,
+                    reverb_dry_gain=reverb_dry_gain,
+                    reverb_width=reverb_width,
+                    reverb_freeze_mode=reverb_freeze_mode,
+                    pitch_shift_semitones=pitch_shift_semitones,
+                    limiter_threshold=limiter_threshold,
+                    limiter_release_time=limiter_release_time,
+                    gain_db=gain_db,
+                    distortion_gain=distortion_gain,
+                    chorus_rate=chorus_rate,
+                    chorus_depth=chorus_depth,
+                    chorus_center_delay=chorus_center_delay,
+                    chorus_feedback=chorus_feedback,
+                    chorus_mix=chorus_mix,
+                    bitcrush_bit_depth=bitcrush_bit_depth,
+                    clipping_threshold=clipping_threshold,
+                    compressor_threshold=compressor_threshold,
+                    compressor_ratio=compressor_ratio,
+                    compressor_attack=compressor_attack,
+                    compressor_release=compressor_release,
+                    delay_seconds=delay_seconds,
+                    delay_feedback=delay_feedback,
+                    delay_mix=delay_mix,
+                    sid=sid,
+                    seed=seed,
+                    uvmp_submodel=sub_name,
+                )
+                results.append(f"[OK] {display_name}")
+            except Exception as e:
+                results.append(f"[FAIL] {display_name}: {e}")
 
     summary = "\n".join(results)
     return f"Multi-model inference complete for '{os.path.basename(input_path)}':\n{summary}"
@@ -1415,6 +1456,7 @@ def parse_arguments():
         help=delay_mix_description,
         default=0.5,
     )
+    infer_parser.add_argument("--uvmp_submodel", type=str, default=None)
 
     # Parser for 'batch_infer' mode
     batch_infer_parser = subparsers.add_parser(
@@ -1836,6 +1878,7 @@ def parse_arguments():
         help=delay_mix_description,
         default=0.5,
     )
+    batch_infer_parser.add_argument("--uvmp_submodel", type=str, default=None)
 
     # Parser for 'multi_model_infer' mode
     multi_model_infer_parser = subparsers.add_parser(
@@ -1986,6 +2029,7 @@ def parse_arguments():
     multi_model_infer_parser.add_argument("--delay_mix", type=float, default=0.5)
     multi_model_infer_parser.add_argument("--sid", type=int, help=sid_description, default=0)
     multi_model_infer_parser.add_argument("--seed", type=int, default=0)
+    multi_model_infer_parser.add_argument("--uvmp_submodel", type=str, default=None)
 
     # Parser for 'tts' mode
     tts_parser = subparsers.add_parser("tts", help="Run TTS inference")
@@ -2761,6 +2805,7 @@ def main():
                 delay_feedback=args.delay_feedback,
                 delay_mix=args.delay_mix,
                 sid=args.sid,
+                uvmp_submodel=args.uvmp_submodel,
             )
         elif args.mode == "batch_infer":
             run_batch_infer_script(
@@ -2823,6 +2868,7 @@ def main():
                 delay_feedback=args.delay_feedback,
                 delay_mix=args.delay_mix,
                 sid=args.sid,
+                uvmp_submodel=args.uvmp_submodel,
             )
         elif args.mode == "multi_model_infer":
             run_multi_model_infer_script(
@@ -2885,6 +2931,7 @@ def main():
                 delay_mix=args.delay_mix,
                 sid=args.sid,
                 seed=args.seed,
+                uvmp_submodel=args.uvmp_submodel,
             )
         elif args.mode == "tts":
             run_tts_script(
