@@ -554,6 +554,7 @@ def run_train_script(
     custom_lr_d: float = 1e-4,
     freeze_disc: bool = False,
     freeze_gen: bool = False,
+    use_spk_condense: bool = False,
     
 ):
     global training_process
@@ -616,6 +617,7 @@ def run_train_script(
                 custom_lr_d,
                 freeze_disc,
                 freeze_gen,
+                use_spk_condense,
             ],
         ),
     ]
