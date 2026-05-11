@@ -931,6 +931,23 @@ def train_tab():
                             key='custom_lr_d'
                         )
 
+                with gr.Accordion("Freeze Discriminator / Generator", open=False):
+                    with gr.Row():
+                        freeze_disc = gr.Checkbox(
+                            label="Freeze Discriminator",
+                            info="When enabled, the discriminator's weights are frozen — it runs forward but its parameters are never updated. Useful for generator-only fine-tuning.",
+                            value=False,
+                            interactive=True,
+                            key='freeze_disc'
+                        )
+                        freeze_gen = gr.Checkbox(
+                            label="Freeze Generator",
+                            info="When enabled, the generator's weights are frozen — the discriminator trains alone. Useful for warming up a fresh discriminator against a fixed generator.",
+                            value=False,
+                            interactive=True,
+                            key='freeze_gen'
+                        )
+
                 index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
@@ -1008,6 +1025,8 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
+                    freeze_disc,
+                    freeze_gen,
                 ],
                 outputs=[train_output_info],
             )
@@ -1215,7 +1234,7 @@ def train_tab():
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
-                grad_clip_value_d_release, index_algorithm
+                grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen
             ])
 
             def save_training_preset(inputs):
