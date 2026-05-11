@@ -128,6 +128,15 @@ use_custom_lr = strtobool(sys.argv[36])
 custom_lr_g, custom_lr_d = (float(sys.argv[37]), float(sys.argv[38])) if use_custom_lr else (None, None)
 assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
 
+freeze_disc = bool(strtobool(sys.argv[39]))  # Freeze discriminator weights entirely
+freeze_gen  = bool(strtobool(sys.argv[40]))  # Freeze generator weights entirely
+
+if freeze_disc or freeze_gen:
+    parts = []
+    if freeze_disc: parts.append("Discriminator (disc)")
+    if freeze_gen:  parts.append("Generator (gen)")
+    print(f"[FREEZE CONFIG] Frozen: {', '.join(parts)}  |  Unfrozen: {', '.join(p for p in ['Discriminator (disc)', 'Generator (gen)'] if p not in parts)}")
+
 # Parse command line arguments end region ===========================
 
 current_dir = os.getcwd()
@@ -845,6 +854,21 @@ def run(
         rank
     )
 
+    # Freeze discriminator / generator if requested
+    if freeze_disc:
+        if rank == 0:
+            print("[FREEZE] Discriminator is FROZEN — disc weights will not be updated.")
+        model_ref_d = net_d.module if hasattr(net_d, "module") else net_d
+        for param in model_ref_d.parameters():
+            param.requires_grad = False
+
+    if freeze_gen:
+        if rank == 0:
+            print("[FREEZE] Generator is FROZEN — gen weights will not be updated.")
+        model_ref_g = net_g.module if hasattr(net_g, "module") else net_g
+        for param in model_ref_g.parameters():
+            param.requires_grad = False
+
     # Tensorboard handling
     if rank == 0:
         writer_eval = SummaryWriter(
@@ -1138,19 +1162,22 @@ def training_loop(
 
 
             # Discriminator backward and update:
-            optim_d.zero_grad(set_to_none=True)
-            if train_dtype == torch.float16:
-                gradscaler.scale(loss_disc).backward() # Scale and backward of the loss
-                gradscaler.unscale_(optim_d) # Unscale
-                scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
-                gradscaler.step(optim_d) # Optim step
-                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+            if not freeze_disc:
+                optim_d.zero_grad(set_to_none=True)
+                if train_dtype == torch.float16:
+                    gradscaler.scale(loss_disc).backward() # Scale and backward of the loss
+                    gradscaler.unscale_(optim_d) # Unscale
+                    scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
+                    gradscaler.step(optim_d) # Optim step
+                    univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                else:
+                    loss_disc.backward() # Loss backward
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
+                    optim_d.step() # Optim step
+                    univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
             else:
-                loss_disc.backward() # Loss backward
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
-                optim_d.step() # Optim step
-                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                grad_norm_d = torch.tensor(0.0)  # dummy for logging when frozen
 
             # Run discriminator on generated output
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
@@ -1212,18 +1239,22 @@ def training_loop(
                         loss_gen_total = loss_adv + loss_fm + loss_mel
 
             # Generator backward and update:
-            optim_g.zero_grad(set_to_none=True)
-            if train_dtype == torch.float16:
-                gradscaler.scale(loss_gen_total).backward() # Scale and backward of the loss
-                gradscaler.unscale_(optim_g) # Unscale
-                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
-                gradscaler.step(optim_g) # Optim step
-                gradscaler.update() # Scaler update, to prepare the scaling for the next iteration
-                skip_lr_sched = (scale > gradscaler.get_scale())
+            if not freeze_gen:
+                optim_g.zero_grad(set_to_none=True)
+                if train_dtype == torch.float16:
+                    gradscaler.scale(loss_gen_total).backward() # Scale and backward of the loss
+                    gradscaler.unscale_(optim_g) # Unscale
+                    grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
+                    gradscaler.step(optim_g) # Optim step
+                    gradscaler.update() # Scaler update, to prepare the scaling for the next iteration
+                    skip_lr_sched = (scale > gradscaler.get_scale())
+                else:
+                    loss_gen_total.backward() # Loss backward
+                    grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
+                    optim_g.step() # Optim step
+                    skip_lr_sched = False
             else:
-                loss_gen_total.backward() # Loss backward
-                grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
-                optim_g.step() # Optim step
+                grad_norm_g = torch.tensor(0.0)  # dummy for logging when frozen
                 skip_lr_sched = False
 
             # Per step exp lr decay for generator
