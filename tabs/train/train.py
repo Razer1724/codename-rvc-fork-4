@@ -948,6 +948,22 @@ def train_tab():
                             key='freeze_gen'
                         )
 
+                with gr.Accordion("Speaker Condensation", open=False):
+                    use_spk_condense = gr.Checkbox(
+                        label="Enable Speaker Condensation",
+                        info=(
+                            "When your dataset has **more speaker IDs than the pretrained model supports**, "
+                            "enabling this automatically shrinks `spk_embed_dim` to the pretrain's capacity "
+                            "and remaps out-of-range speaker IDs during training. "
+                            "**Speakers 0 and 1 are always preserved.** "
+                            "All other IDs ≥ 2 are wrapped via `(2 + (sid - 2) % (pretrain_n_spk - 2))`. "
+                            "Leave disabled if your pretrain and dataset speaker counts already match."
+                        ),
+                        value=False,
+                        interactive=True,
+                        key='use_spk_condense'
+                    )
+
                 index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
@@ -1027,6 +1043,7 @@ def train_tab():
                     custom_lr_d,
                     freeze_disc,
                     freeze_gen,
+                    use_spk_condense,
                 ],
                 outputs=[train_output_info],
             )
@@ -1234,7 +1251,8 @@ def train_tab():
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
-                grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen
+                grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
+                use_spk_condense
             ])
 
             def save_training_preset(inputs):
