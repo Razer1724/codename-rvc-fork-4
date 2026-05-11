@@ -44,6 +44,11 @@ SAMPLE_RATE_16K = 16000
 RES_TYPE = "soxr_vhq"
 FLAC_COMPRESSION_LEVEL = 5 / 8 # FLAC level 5, libsndfile uses 0.0 - 1.0 range for compression level
 
+# Large-file streaming: files longer than this are read in blocks instead of all at once
+LARGE_FILE_THRESHOLD_SECS = 3600   # 1 hour
+STREAM_BLOCK_SECS         = 1800    # process 30 minutes per block
+STREAM_OVERLAP_SECS       = 2.0    # overlap between consecutive blocks (avoids boundary cut-off)
+
 
 def secs_to_samples(secs, sr):
     """Return an *exact* integer number of samples for `secs` seconds at `sr` Hz.
@@ -102,6 +107,185 @@ class PreProcess:
         os.makedirs(self.gt_wavs_dir, exist_ok=True)
         os.makedirs(self.wavs16k_dir, exist_ok=True)
 
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_file_duration(path: str):
+        """Return file duration in seconds without loading audio, or None on failure."""
+        try:
+            return sf.info(path).duration
+        except Exception:
+            return None
+
+    def _load_audio_with_fallback(self, path: str, loading_resampling: str) -> np.ndarray:
+        """
+        Load audio using the requested backend.
+        If that fails, fall back to librosa.load automatically.
+        """
+        try:
+            if loading_resampling == "librosa":
+                return load_audio(path, self.sr)
+            else:
+                return load_audio_ffmpeg(path, self.sr)
+        except Exception as primary_err:
+            logger.warning(
+                f"Primary loader ({'librosa/SoXr' if loading_resampling == 'librosa' else 'ffmpeg'}) "
+                f"failed for '{path}': {primary_err}. Falling back to librosa.load …"
+            )
+            try:
+                audio, _ = librosa.load(path, sr=self.sr, mono=True)
+                return audio
+            except Exception as fallback_err:
+                raise RuntimeError(
+                    f"Both primary loader and librosa fallback failed for '{path}'. "
+                    f"Librosa error: {fallback_err}"
+                ) from fallback_err
+
+    def _stream_audio_blocks(self, path: str):
+        """
+        Generator that yields overlapping float32 mono audio blocks at self.sr.
+        Designed for very large files (> LARGE_FILE_THRESHOLD_SECS) so the whole
+        file is never held in RAM at once.
+
+        Yields: (block_audio, is_first_block)
+        """
+        try:
+            info = sf.info(path)
+        except Exception as e:
+            raise RuntimeError(f"soundfile could not read metadata for '{path}': {e}") from e
+
+        native_sr   = info.samplerate
+        block_frames   = int(native_sr * STREAM_BLOCK_SECS)
+        overlap_frames = int(native_sr * STREAM_OVERLAP_SECS)
+
+        overlap_sr_samples = int(self.sr * STREAM_OVERLAP_SECS)
+
+        prev_tail_native = None  # raw (native SR) tail carried between blocks
+        is_first = True
+
+        for raw_block in sf.blocks(path, blocksize=block_frames, dtype="float32", always_2d=False):
+            # Convert to mono
+            if raw_block.ndim > 1:
+                raw_block = raw_block.mean(axis=1)
+
+            # Prepend the tail of the previous block so the slicer sees context
+            if prev_tail_native is not None:
+                combined = np.concatenate([prev_tail_native, raw_block])
+            else:
+                combined = raw_block
+
+            # Save tail for next iteration before we modify combined
+            prev_tail_native = raw_block[-overlap_frames:].copy() if len(raw_block) >= overlap_frames else raw_block.copy()
+
+            # Resample to target SR
+            if native_sr != self.sr:
+                block_resampled = librosa.resample(combined, orig_sr=native_sr, target_sr=self.sr, res_type=RES_TYPE)
+            else:
+                block_resampled = combined.copy()
+
+            # Trim the prepended overlap from the *output* (except for the very first block)
+            # so we don't double-process the overlap region.
+            if not is_first:
+                block_resampled = block_resampled[overlap_sr_samples:]
+
+            yield block_resampled, is_first
+            is_first = False
+
+    def _process_audio_streaming(
+        self,
+        path: str,
+        idx0: int,
+        sid: int,
+        cut_preprocess: str,
+        process_effects: bool,
+        noise_reduction: bool,
+        reduction_strength: float,
+        chunk_len: float,
+        overlap_len: float,
+        loading_resampling: str,
+        dataset_format: str,
+        normalization_mode: str,
+    ) -> float:
+        """
+        Memory-efficient processing pipeline for files longer than LARGE_FILE_THRESHOLD_SECS.
+        Reads the file in overlapping blocks and runs each block through the normal
+        effects / slicing / saving pipeline without ever holding the full file in RAM.
+        """
+        if noise_reduction:
+            logger.warning(
+                "Noise reduction with streaming large files processes each block "
+                "independently — the noise profile is estimated per block."
+            )
+
+        audio_length = 0.0
+        idx1 = 0   # global segment counter across all blocks
+
+        for block_audio, _is_first in self._stream_audio_blocks(path):
+            block_duration = librosa.get_duration(y=block_audio, sr=self.sr)
+            audio_length += block_duration
+
+            # Effects
+            if process_effects:
+                block_audio = signal.lfilter(self.b_high, self.a_high, block_audio)
+            if noise_reduction:
+                import noisereduce as nr
+                block_audio = nr.reduce_noise(
+                    y=block_audio, sr=self.sr, prop_decrease=reduction_strength
+                )
+
+            # Normalization (pre modes only — post modes are applied globally after all workers finish)
+            if normalization_mode == "pre_rms":
+                eps = 1e-9
+                target_rms = 10 ** (-18.0 / 20)
+                headroom   = 10 ** (-0.5  / 20)
+                silence_thresh = 10 ** (-40.0 / 20)
+                mask = np.abs(block_audio) > silence_thresh
+                if np.any(mask):
+                    rms  = np.sqrt(np.mean(block_audio[mask] ** 2) + eps)
+                    gain = target_rms / rms
+                else:
+                    gain = 1.0
+                block_audio = block_audio * gain
+                peak = np.abs(block_audio).max()
+                if peak > headroom:
+                    block_audio = block_audio / peak * headroom
+                block_audio = block_audio.astype(np.float32)
+            elif normalization_mode == "pre_peak":
+                peak = np.max(np.abs(block_audio))
+                if peak > 0:
+                    block_audio = (block_audio / peak * MAX_AMPLITUDE).astype(np.float32)
+
+            # Slicing
+            if cut_preprocess == "Skip":
+                self.process_audio_segment(block_audio, sid, idx0, idx1, loading_resampling, dataset_format)
+                idx1 += 1
+            elif cut_preprocess == "Simple":
+                # simple_cut manages its own internal slice_idx per call; use idx1 as the
+                # outer index so filenames remain unique across blocks.
+                self.simple_cut(block_audio, sid, idx1, chunk_len, overlap_len, loading_resampling, dataset_format)
+                idx1 += 1
+            elif cut_preprocess == "Automatic":
+                for audio_segment in self.slicer.slice(block_audio):
+                    i = 0
+                    while True:
+                        start = int(self.sr * (PERCENTAGE - OVERLAP) * i)
+                        i += 1
+                        if len(audio_segment[start:]) > (PERCENTAGE + OVERLAP) * self.sr:
+                            tmp_audio = audio_segment[start : start + int(PERCENTAGE * self.sr)]
+                            self.process_audio_segment(tmp_audio, sid, idx0, idx1, loading_resampling, dataset_format)
+                            idx1 += 1
+                        else:
+                            tmp_audio = audio_segment[start:]
+                            self.process_audio_segment(tmp_audio, sid, idx0, idx1, loading_resampling, dataset_format)
+                            idx1 += 1
+                            break
+
+        return audio_length
+
+    # ------------------------------------------------------------------
 
     def process_audio_segment(
         self,
@@ -192,11 +376,30 @@ class PreProcess:
     ):
         audio_length = 0
         try:
-            # Loading the audio
-            if loading_resampling == "librosa":
-                audio = load_audio(path, self.sr) # Librosa's using SoXr
-            else:
-                audio = load_audio_ffmpeg(path, self.sr) # FFmpeg's using Windowed Sinc filter with Blackman-Nuttall window.
+            # -----------------------------------------------------------------
+            # Check duration first (no audio loaded yet) to choose load strategy
+            # -----------------------------------------------------------------
+            file_duration = self._get_file_duration(path)
+            is_large_file = file_duration is not None and file_duration > LARGE_FILE_THRESHOLD_SECS
+
+            if is_large_file:
+                logger.info(
+                    f"Large file detected ({format_duration(file_duration)}): '{path}'. "
+                    f"Using memory-efficient streaming mode ({STREAM_BLOCK_SECS // 60}-min blocks)."
+                )
+                audio_length = self._process_audio_streaming(
+                    path, idx0, sid, cut_preprocess, process_effects, noise_reduction,
+                    reduction_strength, chunk_len, overlap_len, loading_resampling,
+                    dataset_format, normalization_mode,
+                )
+                return audio_length
+
+            # -----------------------------------------------------------------
+            # Normal (non-streaming) path for files under the threshold
+            # -----------------------------------------------------------------
+
+            # Load audio — fall back to librosa if the primary loader fails
+            audio = self._load_audio_with_fallback(path, loading_resampling)
 
             # Getting the length
             audio_length = librosa.get_duration(y=audio, sr=self.sr)
