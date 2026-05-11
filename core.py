@@ -552,6 +552,8 @@ def run_train_script(
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
+    freeze_disc: bool = False,
+    freeze_gen: bool = False,
     
 ):
     global training_process
@@ -611,7 +613,9 @@ def run_train_script(
                 grad_clip_value_d_release,
                 use_custom_lr,
                 custom_lr_g,
-                custom_lr_d
+                custom_lr_d,
+                freeze_disc,
+                freeze_gen,
             ],
         ),
     ]
@@ -2051,6 +2055,20 @@ def parse_arguments():
         default=1e-4,
     )
     train_parser.add_argument(
+        "--freeze_disc",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Freeze discriminator weights (no disc updates during training).",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--freeze_gen",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Freeze generator weights (no gen updates during training).",
+        default=False,
+    )
+    train_parser.add_argument(
         "--epoch_save_frequency",
         type=int,
         help="Save the model every specified number of epochs.",
@@ -2607,6 +2625,8 @@ def main():
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,
+                freeze_disc=args.freeze_disc,
+                freeze_gen=args.freeze_gen,
             )
         elif args.mode == "index":
             run_index_script(
