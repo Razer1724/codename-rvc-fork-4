@@ -131,6 +131,8 @@ assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR va
 freeze_disc = bool(strtobool(sys.argv[39]))  # Freeze discriminator weights entirely
 freeze_gen  = bool(strtobool(sys.argv[40]))  # Freeze generator weights entirely
 
+use_spk_condense = bool(strtobool(sys.argv[41]))  # Speaker condensation: shrink spk_embed_dim to pretrain's capacity when dataset has more speakers
+
 if freeze_disc or freeze_gen:
     parts = []
     if freeze_disc: parts.append("Discriminator (disc)")
@@ -541,6 +543,33 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             checkpoint = torch.load(pretrainG, map_location="cpu", weights_only=True)
             state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
 
+            # ── Speaker-count mismatch detection ──────────────────────────────
+            # When use_spk_condense is enabled and the pretrained emb_g supports
+            # fewer speakers than the dataset, shrink spk_embed_dim to the
+            # pretrain's capacity and rebuild net_g so shapes match for strict
+            # load.  Speaker IDs that exceed the pretrained count are remapped
+            # via modulo during training (speakers 0 and 1 are always preserved).
+            if use_spk_condense and "emb_g.weight" in state_dict:
+                pretrain_n_spk = state_dict["emb_g.weight"].shape[0]
+                dataset_n_spk  = net_g.emb_g.weight.size(0)
+
+                if dataset_n_spk > pretrain_n_spk:
+                    if rank == 0:
+                        print(
+                            f"[SPK CONDENSE] Dataset has {dataset_n_spk} speakers but "
+                            f"pretrained model supports only {pretrain_n_spk}."
+                        )
+                        print(
+                            f"[SPK CONDENSE] Condensing spk_embed_dim to {pretrain_n_spk}. "
+                            f"Speakers 0 and 1 are preserved. Dataset speaker IDs >= 2 will be "
+                            f"remapped via (2 + (sid - 2) % {pretrain_n_spk - 2}) during training."
+                        )
+                    config.model.spk_embed_dim = pretrain_n_spk
+                    # Rebuild net_g with the corrected speaker dimension so that
+                    # load_state_dict can proceed with strict=True.
+                    net_g = get_g_model(config, sample_rate, vocoder, use_checkpointing)
+            # ──────────────────────────────────────────────────────────────────
+
             net_g.load_state_dict(state_dict, strict=True)
 
             if use_sid_swap and custom_sid != 0:
@@ -656,6 +685,19 @@ def get_reference_sample(train_loader, device, config):
         info = next(iter(train_loader))
         phone, phone_lengths, pitch, pitchf, _, _, _, _, sid = info
         phone, phone_lengths, pitch, pitchf, sid = phone.to(device), phone_lengths.to(device), pitch.to(device), pitchf.to(device), sid.to(device)
+
+        # Clamp the reference SID into the valid embedding range.
+        # When speaker condensation is active, config.model.spk_embed_dim is
+        # already the pretrained model's (smaller) speaker count, so any raw
+        # dataset SID that exceeds it must be wrapped the same way the training
+        # loop does it — otherwise eval_infer will crash with an IndexError at
+        # every epoch save boundary.
+        # Speakers 0 and 1 are preserved as-is; only IDs >= 2 are remapped.
+        if use_spk_condense and config.model.spk_embed_dim > 2:
+            high_sid_range = config.model.spk_embed_dim - 2
+            sid = torch.where(sid < 2, sid, 2 + (sid - 2) % high_sid_range)
+        elif use_spk_condense:
+            sid = sid % config.model.spk_embed_dim
 
         batch_indices = []
         for batch in train_loader.batch_sampler:
@@ -1116,6 +1158,21 @@ def training_loop(
 
             # Tuple unpacking
             (phone, phone_lengths, pitch, pitchf, spec, spec_lengths, y, y_lengths, sid) = info
+
+            # ── Speaker-ID condensation ────────────────────────────────────────
+            # If the pretrained model had fewer speakers than the dataset, the
+            # spk_embed_dim was shrunk at load time.  Clamp every batch's sid
+            # values into [0, spk_embed_dim - 1] using modulo so we never hit
+            # an out-of-bounds index in the speaker embedding table.
+            # Speakers 0 and 1 are always preserved as-is; only IDs >= 2 are
+            # remapped into [2, spk_embed_dim - 1] via modulo.
+            if use_spk_condense:
+                if config.model.spk_embed_dim > 2:
+                    high_sid_range = config.model.spk_embed_dim - 2
+                    sid = torch.where(sid < 2, sid, 2 + (sid - 2) % high_sid_range)
+                else:
+                    sid = sid % config.model.spk_embed_dim
+            # ──────────────────────────────────────────────────────────────────
 
             # Generator forward pass:
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
