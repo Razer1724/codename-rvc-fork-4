@@ -1303,8 +1303,9 @@ def training_loop(
                     gradscaler.unscale_(optim_g) # Unscale
                     grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
                     gradscaler.step(optim_g) # Optim step
+                    scale_before = gradscaler.get_scale() # Capture scale before update to detect inf/nan skips
                     gradscaler.update() # Scaler update, to prepare the scaling for the next iteration
-                    skip_lr_sched = (scale > gradscaler.get_scale())
+                    skip_lr_sched = (scale_before > gradscaler.get_scale())
                 else:
                     loss_gen_total.backward() # Loss backward
                     grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
