@@ -28,12 +28,23 @@ torchvision==0.22.1
 torchcrepe==0.0.23
 torch-optimizer
 einops
-transformers==4.44.2
+# Bumped from 4.44.2 — urgent_mos requires >=4.45
+transformers>=4.45.0
 nnaudio==0.3.3
 ring-attention-pytorch @ https://github.com/codename0og/codename-essentials/raw/refs/heads/main/ring_attention_pytorch-0.5.17-py3-none-any.whl
 triton==3.3.1; sys_platform == "linux"
 triton-windows==3.3.1.post21; sys_platform == "win32"
 peft==0.17.1
+
+# URGENT-MOS dependencies (speech quality / MOS evaluation)
+# The urgent_mos package itself is bundled in the repo root — no separate install needed.
+# These are its runtime dependencies not already covered above.
+accelerate
+datasets
+huggingface_hub
+hydra-core
+omegaconf
+torchcodec
 
 # Visualization and UI
 matplotlib==3.10.8
