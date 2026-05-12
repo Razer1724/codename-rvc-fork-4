@@ -555,6 +555,7 @@ def run_train_script(
     freeze_disc: bool = False,
     freeze_gen: bool = False,
     use_spk_condense: bool = False,
+    urgentmos_ref_audio: str = "None",
     
 ):
     global training_process
@@ -618,6 +619,7 @@ def run_train_script(
                 freeze_disc,
                 freeze_gen,
                 use_spk_condense,
+                urgentmos_ref_audio,
             ],
         ),
     ]
@@ -2071,6 +2073,17 @@ def parse_arguments():
         default=False,
     )
     train_parser.add_argument(
+        "--urgentmos_ref_audio",
+        type=str,
+        default="None",
+        help=(
+            "Optional path to a reference .wav/.flac file used for URGENT-MOS "
+            "comparative evaluation. If omitted or set to 'None', the trainer "
+            "automatically picks the first (alphabetically sorted) file from "
+            "the sliced_audios folder."
+        ),
+    )
+    train_parser.add_argument(
         "--epoch_save_frequency",
         type=int,
         help="Save the model every specified number of epochs.",
@@ -2629,6 +2642,7 @@ def main():
                 custom_lr_d=args.custom_lr_d,
                 freeze_disc=args.freeze_disc,
                 freeze_gen=args.freeze_gen,
+                urgentmos_ref_audio=getattr(args, "urgentmos_ref_audio", "None"),
             )
         elif args.mode == "index":
             run_index_script(
