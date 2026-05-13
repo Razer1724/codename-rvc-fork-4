@@ -556,6 +556,8 @@ def run_train_script(
     freeze_gen: bool = False,
     use_spk_condense: bool = False,
     urgentmos_ref_audio: str = "None",
+    freeze_text_encoder: bool = False,
+    freeze_emb_pitch: bool = False,
     
 ):
     global training_process
@@ -620,6 +622,8 @@ def run_train_script(
                 freeze_gen,
                 use_spk_condense,
                 urgentmos_ref_audio,
+                freeze_text_encoder,
+                freeze_emb_pitch,
             ],
         ),
     ]
@@ -2073,6 +2077,20 @@ def parse_arguments():
         default=False,
     )
     train_parser.add_argument(
+        "--freeze_text_encoder",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Freeze TextEncoder (enc_p) weights — the text/phone encoder won't be updated.",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--freeze_emb_pitch",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Freeze pitch embedding (enc_p.emb_pitch) — only the pitch embedding layer is frozen.",
+        default=False,
+    )
+    train_parser.add_argument(
         "--urgentmos_ref_audio",
         type=str,
         default="None",
@@ -2643,6 +2661,8 @@ def main():
                 freeze_disc=args.freeze_disc,
                 freeze_gen=args.freeze_gen,
                 urgentmos_ref_audio=getattr(args, "urgentmos_ref_audio", "None"),
+                freeze_text_encoder=getattr(args, "freeze_text_encoder", False),
+                freeze_emb_pitch=getattr(args, "freeze_emb_pitch", False),
             )
         elif args.mode == "index":
             run_index_script(
