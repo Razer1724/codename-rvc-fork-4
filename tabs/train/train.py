@@ -931,7 +931,7 @@ def train_tab():
                             key='custom_lr_d'
                         )
 
-                with gr.Accordion("Freeze Discriminator / Generator", open=False):
+                with gr.Accordion("Freeze Discriminator / Generator / Encoder", open=False):
                     with gr.Row():
                         freeze_disc = gr.Checkbox(
                             label="Freeze Discriminator",
@@ -946,6 +946,21 @@ def train_tab():
                             value=False,
                             interactive=True,
                             key='freeze_gen'
+                        )
+                    with gr.Row():
+                        freeze_text_encoder = gr.Checkbox(
+                            label="Freeze TextEncoder",
+                            info="When enabled, all weights in the TextEncoder (enc_p) are frozen. The phone/text representations are kept fixed while the rest of the generator continues to train. Useful when the pretrained encoder is already well-adapted and you want to avoid corrupting it.",
+                            value=False,
+                            interactive=True,
+                            key='freeze_text_encoder'
+                        )
+                        freeze_emb_pitch = gr.Checkbox(
+                            label="Freeze Pitch Embedding (emb_pitch)",
+                            info="When enabled, only the pitch embedding layer (enc_p.emb_pitch) is frozen. All other encoder and generator weights still update normally. Useful to preserve a pretrained pitch representation while fine-tuning the rest of the model.",
+                            value=False,
+                            interactive=True,
+                            key='freeze_emb_pitch'
                         )
 
                 with gr.Accordion("Speaker Condensation", open=False):
@@ -1069,6 +1084,8 @@ def train_tab():
                     freeze_gen,
                     use_spk_condense,
                     urgentmos_ref_audio,
+                    freeze_text_encoder,
+                    freeze_emb_pitch,
                 ],
                 outputs=[train_output_info],
             )
@@ -1277,7 +1294,7 @@ def train_tab():
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
                 grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
-                use_spk_condense, urgentmos_ref_audio
+                use_spk_condense, urgentmos_ref_audio, freeze_text_encoder, freeze_emb_pitch
             ])
 
             def save_training_preset(inputs):
