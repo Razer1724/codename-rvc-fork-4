@@ -138,11 +138,17 @@ use_spk_condense = bool(strtobool(sys.argv[41]))  # Speaker condensation: shrink
 urgentmos_ref_override = sys.argv[42] if len(sys.argv) > 42 else "None"
 urgentmos_ref_override = None if urgentmos_ref_override in ("None", "", "none") else urgentmos_ref_override
 
-if freeze_disc or freeze_gen:
+freeze_text_encoder = bool(strtobool(sys.argv[43])) if len(sys.argv) > 43 else False  # Freeze TextEncoder (enc_p) weights
+freeze_emb_pitch    = bool(strtobool(sys.argv[44])) if len(sys.argv) > 44 else False  # Freeze emb_pitch embedding only
+
+if freeze_disc or freeze_gen or freeze_text_encoder or freeze_emb_pitch:
     parts = []
-    if freeze_disc: parts.append("Discriminator (disc)")
-    if freeze_gen:  parts.append("Generator (gen)")
-    print(f"[FREEZE CONFIG] Frozen: {', '.join(parts)}  |  Unfrozen: {', '.join(p for p in ['Discriminator (disc)', 'Generator (gen)'] if p not in parts)}")
+    if freeze_disc:         parts.append("Discriminator (disc)")
+    if freeze_gen:          parts.append("Generator (gen)")
+    if freeze_text_encoder: parts.append("TextEncoder (enc_p)")
+    if freeze_emb_pitch:    parts.append("Pitch Embedding (enc_p.emb_pitch)")
+    all_parts = ["Discriminator (disc)", "Generator (gen)", "TextEncoder (enc_p)", "Pitch Embedding (enc_p.emb_pitch)"]
+    print(f"[FREEZE CONFIG] Frozen: {', '.join(parts)}  |  Unfrozen: {', '.join(p for p in all_parts if p not in parts)}")
 
 # Parse command line arguments end region ===========================
 
@@ -934,6 +940,28 @@ def run(
         model_ref_g = net_g.module if hasattr(net_g, "module") else net_g
         for param in model_ref_g.parameters():
             param.requires_grad = False
+
+    if freeze_text_encoder:
+        if rank == 0:
+            print("[FREEZE] TextEncoder (enc_p) is FROZEN — enc_p weights will not be updated.")
+        model_ref_g = net_g.module if hasattr(net_g, "module") else net_g
+        if hasattr(model_ref_g, "enc_p"):
+            for param in model_ref_g.enc_p.parameters():
+                param.requires_grad = False
+        else:
+            if rank == 0:
+                print("[FREEZE WARNING] enc_p not found on generator — TextEncoder freeze skipped.")
+
+    if freeze_emb_pitch:
+        if rank == 0:
+            print("[FREEZE] Pitch Embedding (enc_p.emb_pitch) is FROZEN — emb_pitch weights will not be updated.")
+        model_ref_g = net_g.module if hasattr(net_g, "module") else net_g
+        if hasattr(model_ref_g, "enc_p") and hasattr(model_ref_g.enc_p, "emb_pitch") and model_ref_g.enc_p.emb_pitch is not None:
+            for param in model_ref_g.enc_p.emb_pitch.parameters():
+                param.requires_grad = False
+        else:
+            if rank == 0:
+                print("[FREEZE WARNING] enc_p.emb_pitch not found or is None — emb_pitch freeze skipped.")
 
     # Tensorboard handling
     if rank == 0:
