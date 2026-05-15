@@ -4,12 +4,10 @@ import time
 from scipy import signal
 from scipy.io import wavfile
 import numpy as np
-import concurrent.futures
 from tqdm import tqdm
 import json
 from distutils.util import strtobool
 import librosa
-import multiprocessing
 import shutil
 import soundfile as sf
 import io
@@ -510,16 +508,31 @@ def _apply_post_norm(audio: np.ndarray, sr: int, mode: str) -> np.ndarray:
     return audio.astype(np.float32)
 
 
+def _sf_read_with_fallback(file_path: str):
+    """Read an audio file with soundfile, falling back to librosa on failure."""
+    try:
+        audio, sr = sf.read(file_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        return audio.astype(np.float32), sr
+    except Exception as sf_err:
+        logger.warning(
+            f"soundfile failed to read '{file_path}': {sf_err}. Falling back to librosa ..."
+        )
+        audio, sr = librosa.load(file_path, sr=None, mono=True)
+        return audio.astype(np.float32), sr
+
+
 def _process_and_save_worker(args):
     """Shared post-norm worker"""
     file_name, gt_wavs_dir, wavs16k_dir, mode = args
     try:
         stem, ext = file_name.split(".")[0], file_name.split(".")[1]
 
-        gt_audio, gt_sr = sf.read(os.path.join(gt_wavs_dir, file_name))
+        gt_audio, gt_sr = _sf_read_with_fallback(os.path.join(gt_wavs_dir, file_name))
         save_audio(gt_wavs_dir, stem, gt_sr, ext, _apply_post_norm(gt_audio, gt_sr, mode))
 
-        k16_audio, k16_sr = sf.read(os.path.join(wavs16k_dir, file_name))
+        k16_audio, k16_sr = _sf_read_with_fallback(os.path.join(wavs16k_dir, file_name))
         save_audio(wavs16k_dir, stem, k16_sr, ext, _apply_post_norm(k16_audio, k16_sr, mode))
     except Exception as e:
         logger.error(f"Error normalizing {file_name} ({mode}): {e}")
@@ -680,61 +693,50 @@ def preprocess_training_set(
 
     total_audio_length = 0
 
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        for speaker_dir, audio_paths in tqdm(speaker_map.items(), desc="Processing Speakers"):
+    pp = PreProcess(sr, exp_dir)
 
-            temp_speaker_dir = None
-            current_batch_paths = []
-            try:
-                if speaker_dir == input_root:
-                    sid = 0
-                else:
-                    folder_name = os.path.basename(speaker_dir)
-                    sid_str = folder_name.split('_')[0] 
-                    sid = int(sid_str)
-            except (ValueError, IndexError):
-                logger.warning(f"Folder '{os.path.basename(speaker_dir)}' does not start with a valid integer ID. Using SID 0.")
+    for speaker_dir, audio_paths in tqdm(speaker_map.items(), desc="Processing Speakers"):
+
+        temp_speaker_dir = None
+        current_batch_paths = []
+        try:
+            if speaker_dir == input_root:
                 sid = 0
-
-            if use_smart_cutter and sc_engine:
-                temp_speaker_dir = os.path.join(exp_dir, "smart_cut_temp", str(sid))
-                os.makedirs(temp_speaker_dir, exist_ok=True)
-
-                for file_path in audio_paths:
-                    filename = os.path.basename(file_path)
-                    out_path = os.path.join(temp_speaker_dir, filename)
-
-                    sc_engine.process_file(file_path, out_path)
-                    current_batch_paths.append(out_path)
             else:
-                current_batch_paths = audio_paths
+                folder_name = os.path.basename(speaker_dir)
+                sid_str = folder_name.split('_')[0]
+                sid = int(sid_str)
+        except (ValueError, IndexError):
+            logger.warning(f"Folder '{os.path.basename(speaker_dir)}' does not start with a valid integer ID. Using SID 0.")
+            sid = 0
 
-            arg_list = [
-                (
-                    f_path,
-                    idx,
-                    sid,
-                    sr,
-                    exp_dir,
-                    cut_preprocess,
-                    process_effects,
-                    noise_reduction,
-                    reduction_strength,
-                    chunk_len,
-                    overlap_len,
-                    loading_resampling,
-                    dataset_format,
-                    normalization_mode,
+        if use_smart_cutter and sc_engine:
+            temp_speaker_dir = os.path.join(exp_dir, "smart_cut_temp", str(sid))
+            os.makedirs(temp_speaker_dir, exist_ok=True)
+
+            for file_path in audio_paths:
+                filename = os.path.basename(file_path)
+                out_path = os.path.join(temp_speaker_dir, filename)
+                sc_engine.process_file(file_path, out_path)
+                current_batch_paths.append(out_path)
+        else:
+            current_batch_paths = audio_paths
+
+        for idx, f_path in enumerate(tqdm(current_batch_paths, desc=f"Speaker {sid}", leave=False)):
+            try:
+                result = pp.process_audio(
+                    f_path, idx, sid,
+                    cut_preprocess, process_effects, noise_reduction,
+                    reduction_strength, chunk_len, overlap_len,
+                    loading_resampling, dataset_format, normalization_mode,
                 )
-                for idx, f_path in enumerate(current_batch_paths)
-            ]
-
-            for result in pool.imap_unordered(_process_audio_worker, arg_list):
                 if result:
                     total_audio_length += result
+            except Exception as e:
+                logger.error(f"Skipping '{f_path}': {e}")
 
-            if temp_speaker_dir and os.path.exists(temp_speaker_dir):
-                shutil.rmtree(temp_speaker_dir)
+        if temp_speaker_dir and os.path.exists(temp_speaker_dir):
+            shutil.rmtree(temp_speaker_dir)
 
     main_temp_dir = os.path.join(exp_dir, "smart_cut_temp")
     if os.path.exists(main_temp_dir):
@@ -757,14 +759,8 @@ def preprocess_training_set(
         wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
 
         audio_files = sorted(f for f in os.listdir(gt_wavs_dir) if f.endswith((".wav", ".flac")))
-        arg_list = [(f, gt_wavs_dir, wavs16k_dir, normalization_mode) for f in audio_files]
-
-        with multiprocessing.Pool(processes=num_processes) as pool:
-            list(tqdm(
-                pool.imap_unordered(_process_and_save_worker, arg_list),
-                total=len(audio_files),
-                desc=POST_NORM_MODES[normalization_mode]
-            ))
+        for f in tqdm(audio_files, desc=POST_NORM_MODES[normalization_mode]):
+            _process_and_save_worker((f, gt_wavs_dir, wavs16k_dir, normalization_mode))
 
     elapsed_time = time.time() - start_time
     logger.info(f"Preprocessing completed in {elapsed_time:.2f} seconds "
@@ -777,12 +773,7 @@ if __name__ == "__main__":
     experiment_directory = str(sys.argv[1])
     input_root = str(sys.argv[2])
     sample_rate = int(sys.argv[3])
-    num_processes = sys.argv[4]
-
-    if num_processes.lower() == "none":
-        num_processes = multiprocessing.cpu_count()
-    else:
-        num_processes = int(num_processes)
+    num_processes = sys.argv[4]  # kept for CLI compatibility, no longer used
 
     cut_preprocess = str(sys.argv[5])
     process_effects = bool(strtobool(sys.argv[6]))
