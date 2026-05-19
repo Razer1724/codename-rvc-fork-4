@@ -979,30 +979,6 @@ def train_tab():
                         key='use_spk_condense'
                     )
 
-                with gr.Accordion("URGENT-MOS Evaluation", open=False):
-                    gr.Markdown(
-                        "At each checkpoint epoch, URGENT-MOS scores the generated audio in two ways:\\n"
-                        "- **Absolute** — predicts a MOS score (1-5 scale) for the generated audio alone.\\n"
-                        "- **Comparative** — compares the generated audio against a fixed reference file "
-                        "and predicts a CMOS score (-3...+3, positive = reference preferred).\\n\\n"
-                        "Both results are written to TensorBoard under `Metric/UrgentMOS_Abs/` and "
-                        "`Metric/UrgentMOS_Comp/`. The URGENT-MOS checkpoint is downloaded from "
-                        "HuggingFace on the first eval epoch and cached locally."
-                    )
-                    urgentmos_ref_audio = gr.Textbox(
-                        label="Reference Audio Override (optional)",
-                        info=(
-                            "Path to a .wav or .flac file to use as the fixed reference for comparative "
-                            "CMOS evaluation. Leave blank to let the trainer automatically pick the "
-                            "first (alphabetically sorted) file from your model's sliced_audios folder — "
-                            "the same file is used every epoch for a consistent baseline."
-                        ),
-                        placeholder="e.g. /path/to/reference.wav  (leave blank for auto)",
-                        value="",
-                        interactive=True,
-                        key='urgentmos_ref_audio'
-                    )
-
                 index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
@@ -1083,7 +1059,6 @@ def train_tab():
                     freeze_disc,
                     freeze_gen,
                     use_spk_condense,
-                    urgentmos_ref_audio,
                     freeze_text_encoder,
                     freeze_emb_pitch,
                 ],
@@ -1294,7 +1269,7 @@ def train_tab():
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
                 grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
-                use_spk_condense, urgentmos_ref_audio, freeze_text_encoder, freeze_emb_pitch
+                use_spk_condense, freeze_text_encoder, freeze_emb_pitch
             ])
 
             def save_training_preset(inputs):
