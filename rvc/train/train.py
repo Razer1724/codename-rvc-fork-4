@@ -68,7 +68,6 @@ from utils import (
     early_stopper,
     WeightTrajectoryVisualizer
 )
-from urgent_mos_eval import log_urgent_mos
 from losses import (
     discriminator_loss,
     generator_loss,
@@ -133,11 +132,6 @@ freeze_gen  = bool(strtobool(sys.argv[40]))  # Freeze generator weights entirely
 
 use_spk_condense = bool(strtobool(sys.argv[41]))  # Speaker condensation: shrink spk_embed_dim to pretrain's capacity when dataset has more speakers
 
-# URGENT-MOS: optional path override for the comparison reference audio.
-# Pass "None" (string) or omit to let the trainer pick a file from sliced_audios.
-urgentmos_ref_override = sys.argv[42] if len(sys.argv) > 42 else "None"
-urgentmos_ref_override = None if urgentmos_ref_override in ("None", "", "none") else urgentmos_ref_override
-
 freeze_text_encoder = bool(strtobool(sys.argv[43])) if len(sys.argv) > 43 else False  # Freeze TextEncoder (enc_p) weights
 freeze_emb_pitch    = bool(strtobool(sys.argv[44])) if len(sys.argv) > 44 else False  # Freeze emb_pitch embedding only
 
@@ -179,9 +173,6 @@ global_step = 0
 warmup_completed = False
 from_scratch = False
 use_lr_scheduler = lr_scheduler != "none"
-
-# URGENT-MOS reference file (set in main() from sorted sliced_audios or override)
-mos_comparison_file: str | None = None
 
 # Globals ( tweakable~ )
 enable_persistent_workers = True
@@ -747,20 +738,6 @@ def main():
             os._exit(1)
     else:
         print("No wav file found.")
-
-    # Determine the URGENT-MOS comparison reference file (used every eval epoch)
-    global mos_comparison_file
-    if urgentmos_ref_override:
-        if os.path.isfile(urgentmos_ref_override):
-            mos_comparison_file = urgentmos_ref_override
-            print(f"[URGENT-MOS] Using override reference audio: {mos_comparison_file}")
-        else:
-            print(f"[URGENT-MOS] WARNING: Override path not found: {urgentmos_ref_override}  — falling back to sliced_audios.")
-            mos_comparison_file = None
-    if mos_comparison_file is None and wavs:
-        sorted_wavs = sorted(wavs)
-        mos_comparison_file = sorted_wavs[0]
-        print(f"[URGENT-MOS] Using sliced_audios reference (first sorted): {os.path.basename(mos_comparison_file)}")
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -1580,16 +1557,6 @@ def training_loop(
             # Inferencing on reference sample
             o = eval_infer(net_g, reference)
             audio_dict = {f"gen/audio_{epoch}e_{global_step}s": o[0, :, :]} # Eval-infer samples
-
-            # URGENT-MOS quality evaluation (absolute + comparative)
-            log_urgent_mos(
-                writer=writer,
-                global_step=global_step,
-                gen_audio=o,
-                gen_sr=config.data.sample_rate,
-                ref_wav_path=mos_comparison_file,
-                device=device,
-            )
 
             # Logging
             summarize(
