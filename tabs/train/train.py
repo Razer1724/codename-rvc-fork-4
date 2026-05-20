@@ -282,6 +282,274 @@ if fp16_check:
         initial_optimizer_choices = ["AdamW", "RAdam", "AdamSPD", "Ranger21", "DiffGrad"]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Training Config  –  Save / Load
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Keys must stay in the exact same order as saved_components.extend([...]) below.
+SAVED_COMPONENT_KEYS = [
+    'architecture', 'optimizer', 'adversarial_loss', 'vocoder', 'sampling_rate',
+    'cpu_threads', 'extract_gpu', 'dataset_path', 'dataset_format', 'loading_resampling',
+    'use_smart_cutter', 'normalization_mode', 'cut_preprocess', 'chunk_len', 'overlap_len',
+    'process_effects', 'noise_reduction', 'clean_strength', 'f0_method', 'embedder_model',
+    'include_mutes', 'embedder_model_custom', 'batch_size', 'epoch_save_frequency',
+    'total_epoch_count', 'save_only_latest_net_models', 'save_weight_models', 'pretrained',
+    'cleanup', 'use_checkpointing', 'use_tf32', 'use_benchmark', 'use_deterministic',
+    'spectral_loss', 'lr_scheduler', 'exp_decay_gamma', 'custom_pretrained',
+    'g_pretrained_path', 'd_pretrained_path', 'multiple_gpu', 'training_gpu',
+    'use_warmup', 'warmup_duration', 'use_custom_lr', 'custom_lr_g', 'custom_lr_d',
+    'use_kl_annealing', 'kl_annealing_cycle_duration', 'vits2_mode', 'rolling_loss_steps',
+    'use_tstp', 'grad_clip_scheduling', 'grad_clip_steps_duration', 'grad_clip_value_g_cap',
+    'grad_clip_value_d_cap', 'grad_clip_value_g_release', 'grad_clip_value_d_release',
+    'index_algorithm', 'freeze_disc', 'freeze_gen', 'use_spk_condense',
+    'freeze_text_encoder', 'freeze_emb_pitch',
+]
+
+
+def get_training_config_path(model_name):
+    return os.path.join(now_dir, "logs", model_name, "training_config.json")
+
+
+def save_training_config(model_name, config_dict):
+    config_path = get_training_config_path(model_name)
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(config_dict, f, indent=2)
+    print(f"[CONFIG] Training settings saved → '{config_path}'")
+
+
+def load_training_config(model_name):
+    config_path = get_training_config_path(model_name)
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            return json.load(f)
+    return None
+
+
+def print_config_settings(model_name, cfg):
+    border = "=" * 64
+    print(f"\n{border}")
+    print(f"  [CONFIG] Resuming: '{model_name}'")
+    print(f"  Loaded settings from training_config.json:")
+    print(f"{'─' * 64}")
+    for key, val in cfg.items():
+        print(f"  {key:<40} {val}")
+    print(f"{border}\n")
+
+
+def load_config_and_apply(model_name):
+    """Explicit Load Config button: always prints and notifies."""
+    cfg = load_training_config(model_name)
+    if cfg is None:
+        gr.Info(f"No saved config found for '{model_name}'. Using current UI settings.")
+        return [gr.update() for _ in SAVED_COMPONENT_KEYS]
+    print_config_settings(model_name, cfg)
+    gr.Info(f"✅ Config loaded for '{model_name}'. Settings restored from training_config.json.")
+    return [gr.update(value=cfg[k]) if k in cfg else gr.update() for k in SAVED_COMPONENT_KEYS]
+
+
+def auto_load_config(model_name):
+    """Auto-load when model is selected from dropdown (prints to console only)."""
+    cfg = load_training_config(model_name)
+    if cfg is None:
+        return [gr.update() for _ in SAVED_COMPONENT_KEYS]
+    print_config_settings(model_name, cfg)
+    gr.Info(f"✅ Found saved config for '{model_name}'. Settings auto-restored from training_config.json.")
+    return [gr.update(value=cfg[k]) if k in cfg else gr.update() for k in SAVED_COMPONENT_KEYS]
+
+
+def enforce_terms_and_save(
+    terms_accepted,
+    # ── args passed straight through to run_train_script ──
+    model_name,
+    epoch_save_frequency,
+    save_only_latest_net_models,
+    save_weight_models,
+    total_epoch_count,
+    sampling_rate,
+    batch_size,
+    training_gpu,
+    use_warmup,
+    warmup_duration,
+    pretrained,
+    cleanup,
+    index_algorithm,
+    custom_pretrained,
+    g_pretrained_path,
+    d_pretrained_path,
+    vocoder,
+    architecture,
+    optimizer,
+    adversarial_loss,
+    use_checkpointing,
+    use_tf32,
+    use_benchmark,
+    use_deterministic,
+    spectral_loss,
+    lr_scheduler,
+    exp_decay_gamma,
+    use_kl_annealing,
+    kl_annealing_cycle_duration,
+    vits2_mode,
+    rolling_loss_steps,
+    use_tstp,
+    grad_clip_scheduling,
+    grad_clip_steps_duration,
+    grad_clip_value_g_cap,
+    grad_clip_value_d_cap,
+    grad_clip_value_g_release,
+    grad_clip_value_d_release,
+    use_custom_lr,
+    custom_lr_g,
+    custom_lr_d,
+    freeze_disc,
+    freeze_gen,
+    use_spk_condense,
+    freeze_text_encoder,
+    freeze_emb_pitch,
+    # ── extra args captured only for config saving ──────────
+    cpu_threads,
+    extract_gpu,
+    dataset_path,
+    dataset_format,
+    loading_resampling,
+    use_smart_cutter,
+    normalization_mode,
+    cut_preprocess,
+    chunk_len,
+    overlap_len,
+    process_effects,
+    noise_reduction,
+    clean_strength,
+    f0_method,
+    embedder_model,
+    include_mutes,
+    embedder_model_custom,
+    multiple_gpu,
+):
+    if not terms_accepted:
+        message = "You must agree to the Terms of Use to proceed."
+        gr.Info(message)
+        return message
+
+    # Build and persist the full settings dict
+    config = {
+        'architecture':               architecture,
+        'optimizer':                  optimizer,
+        'adversarial_loss':           adversarial_loss,
+        'vocoder':                    vocoder,
+        'sampling_rate':              sampling_rate,
+        'cpu_threads':                cpu_threads,
+        'extract_gpu':                extract_gpu,
+        'dataset_path':               dataset_path,
+        'dataset_format':             dataset_format,
+        'loading_resampling':         loading_resampling,
+        'use_smart_cutter':           use_smart_cutter,
+        'normalization_mode':         normalization_mode,
+        'cut_preprocess':             cut_preprocess,
+        'chunk_len':                  chunk_len,
+        'overlap_len':                overlap_len,
+        'process_effects':            process_effects,
+        'noise_reduction':            noise_reduction,
+        'clean_strength':             clean_strength,
+        'f0_method':                  f0_method,
+        'embedder_model':             embedder_model,
+        'include_mutes':              include_mutes,
+        'embedder_model_custom':      embedder_model_custom,
+        'batch_size':                 batch_size,
+        'epoch_save_frequency':       epoch_save_frequency,
+        'total_epoch_count':          total_epoch_count,
+        'save_only_latest_net_models': save_only_latest_net_models,
+        'save_weight_models':         save_weight_models,
+        'pretrained':                 pretrained,
+        'cleanup':                    cleanup,
+        'use_checkpointing':          use_checkpointing,
+        'use_tf32':                   use_tf32,
+        'use_benchmark':              use_benchmark,
+        'use_deterministic':          use_deterministic,
+        'spectral_loss':              spectral_loss,
+        'lr_scheduler':               lr_scheduler,
+        'exp_decay_gamma':            exp_decay_gamma,
+        'custom_pretrained':          custom_pretrained,
+        'g_pretrained_path':          g_pretrained_path,
+        'd_pretrained_path':          d_pretrained_path,
+        'multiple_gpu':               multiple_gpu,
+        'training_gpu':               training_gpu,
+        'use_warmup':                 use_warmup,
+        'warmup_duration':            warmup_duration,
+        'use_custom_lr':              use_custom_lr,
+        'custom_lr_g':                custom_lr_g,
+        'custom_lr_d':                custom_lr_d,
+        'use_kl_annealing':           use_kl_annealing,
+        'kl_annealing_cycle_duration': kl_annealing_cycle_duration,
+        'vits2_mode':                 vits2_mode,
+        'rolling_loss_steps':         rolling_loss_steps,
+        'use_tstp':                   use_tstp,
+        'grad_clip_scheduling':       grad_clip_scheduling,
+        'grad_clip_steps_duration':   grad_clip_steps_duration,
+        'grad_clip_value_g_cap':      grad_clip_value_g_cap,
+        'grad_clip_value_d_cap':      grad_clip_value_d_cap,
+        'grad_clip_value_g_release':  grad_clip_value_g_release,
+        'grad_clip_value_d_release':  grad_clip_value_d_release,
+        'index_algorithm':            index_algorithm,
+        'freeze_disc':                freeze_disc,
+        'freeze_gen':                 freeze_gen,
+        'use_spk_condense':           use_spk_condense,
+        'freeze_text_encoder':        freeze_text_encoder,
+        'freeze_emb_pitch':           freeze_emb_pitch,
+    }
+    save_training_config(model_name, config)
+
+    return run_train_script(
+        model_name,
+        epoch_save_frequency,
+        save_only_latest_net_models,
+        save_weight_models,
+        total_epoch_count,
+        sampling_rate,
+        batch_size,
+        training_gpu,
+        use_warmup,
+        warmup_duration,
+        pretrained,
+        cleanup,
+        index_algorithm,
+        custom_pretrained,
+        g_pretrained_path,
+        d_pretrained_path,
+        vocoder,
+        architecture,
+        optimizer,
+        adversarial_loss,
+        use_checkpointing,
+        use_tf32,
+        use_benchmark,
+        use_deterministic,
+        spectral_loss,
+        lr_scheduler,
+        exp_decay_gamma,
+        use_kl_annealing,
+        kl_annealing_cycle_duration,
+        vits2_mode,
+        rolling_loss_steps,
+        use_tstp,
+        grad_clip_scheduling,
+        grad_clip_steps_duration,
+        grad_clip_value_g_cap,
+        grad_clip_value_d_cap,
+        grad_clip_value_g_release,
+        grad_clip_value_d_release,
+        use_custom_lr,
+        custom_lr_g,
+        custom_lr_d,
+        freeze_disc,
+        freeze_gen,
+        use_spk_condense,
+        freeze_text_encoder,
+        freeze_emb_pitch,
+    )
+
+
 # Train Tab
 def train_tab():
     # Model settings section
@@ -963,13 +1231,6 @@ def train_tab():
                     key='index_algorithm'
                 )
 
-        def enforce_terms(terms_accepted, *args):
-            if not terms_accepted:
-                message = "You must agree to the Terms of Use to proceed."
-                gr.Info(message)
-                return message
-            return run_train_script(*args)
-
         terms_checkbox = gr.Checkbox(
             label="I agree to the terms of use",
             info="Please ensure compliance with the terms and conditions detailed in [this document](https://github.com/codename0og/codename-rvc-fork-3/blob/main/TERMS_OF_USE.md) before proceeding with your training.",
@@ -985,11 +1246,18 @@ def train_tab():
         )
 
         with gr.Row():
+            load_config_button = gr.Button(
+                "🔄 Load Config (Override UI with Saved Settings)",
+                variant="secondary",
+            )
+
+        with gr.Row():
             train_button = gr.Button("Start Training")
             train_button.click(
-                fn=enforce_terms,
+                fn=enforce_terms_and_save,
                 inputs=[
                     terms_checkbox,
+                    # ── args forwarded to run_train_script ──
                     model_name,
                     epoch_save_frequency,
                     save_only_latest_net_models,
@@ -1036,6 +1304,25 @@ def train_tab():
                     use_spk_condense,
                     freeze_text_encoder,
                     freeze_emb_pitch,
+                    # ── extra args captured for config saving only ──
+                    cpu_threads,
+                    extract_gpu,
+                    dataset_path,
+                    dataset_format,
+                    loading_resampling,
+                    use_smart_cutter,
+                    normalization_mode,
+                    cut_preprocess,
+                    chunk_len,
+                    overlap_len,
+                    process_effects,
+                    noise_reduction,
+                    clean_strength,
+                    f0_method,
+                    embedder_model,
+                    include_mutes,
+                    embedder_model_custom,
+                    multiple_gpu,
                 ],
                 outputs=[train_output_info],
             )
@@ -1246,6 +1533,20 @@ def train_tab():
                 grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
                 use_spk_condense, freeze_text_encoder, freeze_emb_pitch
             ])
+
+            # ── Config auto-load when model is selected ───────────────────────
+            model_name.change(
+                fn=auto_load_config,
+                inputs=[model_name],
+                outputs=saved_components,
+            )
+
+            # ── Explicit "Load Config" button ─────────────────────────────────
+            load_config_button.click(
+                fn=load_config_and_apply,
+                inputs=[model_name],
+                outputs=saved_components,
+            )
 
             noise_reduction.change(
                 fn=update_noise_reduce_slider_visibility,
