@@ -28,8 +28,7 @@ sys.path.append(now_dir)
 
 supported_audio_ext = { "wav", "mp3", "flac", "ogg", "opus", "m4a", "mp4", "aac", "alac", "wma", "aiff", "webm", "ac3", }
 
-saved_components = [] # List of components that should have their states saved ~ For presets
-
+saved_components = [] # List of components that should have their states saved
 
 # Custom Pretraineds
 pretraineds_custom_path = os.path.join(now_dir, "rvc", "models", "pretraineds", "custom")
@@ -37,14 +36,10 @@ pretraineds_custom_path_relative = os.path.relpath(pretraineds_custom_path, now_
 # Custom embedders
 custom_embedder_root = os.path.join(now_dir, "rvc", "models", "embedders", "embedders_custom")
 custom_embedder_root_relative = os.path.relpath(custom_embedder_root, now_dir)
-# Training presets
-presets_path = os.path.join(now_dir, 'assets', 'training_presets')
-presets_path_relative = os.path.relpath(presets_path, now_dir)
 
 # Ensure dirs existence
 os.makedirs(pretraineds_custom_path_relative, exist_ok=True)
 os.makedirs(custom_embedder_root, exist_ok=True)
-os.makedirs(presets_path, exist_ok=True)
 
 
 def get_pretrained_list(suffix):
@@ -112,10 +107,6 @@ def get_embedder_custom_list():
 
 def refresh_custom_embedder_list():
     return {"choices": sorted(get_embedder_custom_list()), "__type__": "update"}
-
-# Retrieve presets
-def get_presets_list():
-    return [os.path.splitext(s)[0] for s in os.listdir(presets_path) if s.endswith('.json')]
 
 # Drop Model
 def save_drop_model(dropbox):
@@ -293,22 +284,6 @@ if fp16_check:
 
 # Train Tab
 def train_tab():
-    # Training presets section
-    with gr.Accordion("Training Presets", open=False):
-        with gr.Row():
-            refresh_presets_button = gr.Button("Refresh Presets")
-        with gr.Row():
-            with gr.Column():
-                preset_dropdown = gr.Dropdown(
-                    choices=get_presets_list(),
-                    label="Preset Name",
-                    allow_custom_value=True,
-                    interactive=True
-                )
-            with gr.Column():
-                save_preset_button = gr.Button("Save to preset")
-                load_preset_button = gr.Button("Load from preset")
-
     # Model settings section
     with gr.Accordion("Model Settings"):
         with gr.Row():
@@ -1271,56 +1246,6 @@ def train_tab():
                 grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
                 use_spk_condense, freeze_text_encoder, freeze_emb_pitch
             ])
-
-            def save_training_preset(inputs):
-                settings = {}
-                for component in saved_components:
-                    settings[component.key] = inputs[component]
-
-                preset_path = os.path.normpath(os.path.abspath(os.path.join(presets_path, inputs[preset_dropdown] + '.json')))
-
-                if not preset_path.startswith(presets_path):
-                    raise gr.Error(f"Invalid training preset name: {inputs[preset_dropdown]}", duration=5)
-
-                with open(preset_path, 'w', encoding='utf-8') as of:
-                    json.dump(settings, of, indent=4, ensure_ascii=False)
-
-            def load_training_preset(preset_name):
-                if preset_name not in get_presets_list():
-                    raise gr.Error(f'Preset does not exist: {preset_name}')
-
-                preset_path = os.path.normpath(os.path.abspath(os.path.join(presets_path, preset_name + '.json')))
-
-                with open(preset_path, 'r', encoding='utf-8') as ifile:
-                    settings = json.loads(ifile.read())
-
-                return [
-                    settings[component.key] if component.key in settings else gr.skip()
-                    for component in saved_components
-                ]
-
-            refresh_presets_button.click(
-                fn=lambda: gr.Dropdown(choices=get_presets_list()), 
-                outputs=[preset_dropdown]
-            )
-
-            save_preset_button.click(
-                fn=save_training_preset,
-                inputs=set(saved_components) | {preset_dropdown}
-            ).then(
-                fn=lambda: gr.Dropdown(choices=get_presets_list()), 
-                outputs=[preset_dropdown]
-            )
-
-            load_preset_button.click(
-                fn=load_training_preset,
-                inputs=[preset_dropdown],
-                outputs=saved_components
-            ).then(  # update twice so components depending on "change" events get updated
-                fn=load_training_preset,
-                inputs=[preset_dropdown],
-                outputs=saved_components
-            )
 
             noise_reduction.change(
                 fn=update_noise_reduce_slider_visibility,
