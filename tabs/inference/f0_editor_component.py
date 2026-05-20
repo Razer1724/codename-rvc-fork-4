@@ -24,12 +24,10 @@ F0_MAX       = 1100
 # assets/f0editor_userdata/
 #   base_f0/   - persistent per-song CSV caches (hash + method keyed).
 #   session/   - temporary edit CSVs for the pipeline (purged on startup).
-#   f0_presets/- user-saved curve presets (one CSV of raw freqs per preset).
 # ─────────────────────────────────────────────────────────────────────────────
 F0EDITOR_DIR    = os.path.join(now_dir, "assets", "f0editor_userdata")
 F0_BASE_DIR     = os.path.join(F0EDITOR_DIR, "base_f0")
 F0_SESSION_DIR  = os.path.join(F0EDITOR_DIR, "session")
-F0_PRESETS_DIR  = os.path.join(F0EDITOR_DIR, "f0_presets")
 
 # Hash chunk: first 1 MB is enough to uniquely identify audio content while
 # keeping startup fast even for large files.
@@ -71,7 +69,6 @@ def _purge_session_dir() -> None:
 
     # Ensure the other persistent dirs exist
     os.makedirs(F0_BASE_DIR, exist_ok=True)
-    os.makedirs(F0_PRESETS_DIR, exist_ok=True)
 
 
 # Purge stale session files the moment this module loads (= Gradio startup).
@@ -349,68 +346,6 @@ def cleanup_old_temp_f0(max_age_hours: int = 24) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Preset API  (called from inference.py event handlers)
-# ──────────────────────────────────────────────────────────────────────────────
-def _preset_path(name: str) -> str:
-    """Sanitise preset name and return its full .csv path."""
-    safe = "".join(c for c in name if c.isalnum() or c in " _-()").strip()
-    if not safe:
-        raise ValueError(f"Invalid preset name: {name!r}")
-    return os.path.join(F0_PRESETS_DIR, safe + ".csv")
-
-
-def list_f0_presets() -> list[str]:
-    """Return sorted list of saved preset names (without extension)."""
-    if not os.path.isdir(F0_PRESETS_DIR):
-        return []
-    return sorted(
-        os.path.splitext(f)[0]
-        for f in os.listdir(F0_PRESETS_DIR)
-        if f.endswith(".csv")
-    )
-
-
-def save_f0_preset(name: str, freqs_json: str) -> str:
-    """
-    Save a freq array (JSON list of floats) as a named preset CSV.
-    Each line is a single freq value in Hz (0 = unvoiced).
-    Returns a status string.
-    """
-    try:
-        freqs = json.loads(freqs_json)
-        path  = _preset_path(name)
-        os.makedirs(F0_PRESETS_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            for f in freqs:
-                fh.write(f"{f}\n")
-        print(f"[F0Editor] Preset saved: {os.path.basename(path)}")
-        return json.dumps({"ok": True, "names": list_f0_presets()})
-    except Exception as exc:
-        print(f"[F0Editor] Preset save error: {exc}")
-        return json.dumps({"ok": False, "error": str(exc)})
-
-
-def load_f0_preset(name: str) -> str:
-    """
-    Load a named preset CSV and return its freq list as a JSON string.
-    The JS side resamples the list to match the current song's frame count.
-    Returns {"ok": True, "freqs": [...]} or {"ok": False, "error": "..."}.
-    """
-    try:
-        path  = _preset_path(name)
-        freqs = []
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    freqs.append(float(line))
-        return json.dumps({"ok": True, "freqs": freqs})
-    except Exception as exc:
-        print(f"[F0Editor] Preset load error: {exc}")
-        return json.dumps({"ok": False, "error": str(exc)})
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # HTML skeleton
 # ──────────────────────────────────────────────────────────────────────────────
 def build_f0_editor_html() -> str:
@@ -598,44 +533,6 @@ def build_f0_editor_html() -> str:
 }
 #f0ed-statusbar span { color: #9999cc; }
 
-/* ── Preset bar ───────────────────────────────────────────────────────────── */
-#f0ed-presetbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: #0e0e20;
-  border-top: 1px solid #2a2a4a;
-  font-size: 11px;
-  color: #7777aa;
-  flex-wrap: wrap;
-}
-#f0ed-presetbar label { color: #8888bb; white-space: nowrap; }
-#f0ed-preset-select {
-  background: #1a1a35; color: #c0c0e8;
-  border: 1px solid #3a3a6e; border-radius: 4px;
-  padding: 3px 6px; font-size: 11px;
-  min-width: 140px; max-width: 220px;
-  cursor: pointer;
-}
-#f0ed-preset-select:focus { outline: 1px solid #6666cc; }
-#f0ed-preset-name {
-  background: #1a1a35; color: #c0c0e8;
-  border: 1px solid #3a3a6e; border-radius: 4px;
-  padding: 3px 7px; font-size: 11px;
-  width: 140px;
-}
-#f0ed-preset-name:focus { outline: 1px solid #6666cc; }
-#f0ed-presetbar button {
-  background: #22224a; color: #aaaadd;
-  border: 1px solid #4a4a8a; border-radius: 4px;
-  padding: 3px 9px; font-size: 11px;
-  cursor: pointer; white-space: nowrap;
-}
-#f0ed-presetbar button:hover { background: #33336a; color: #fff; }
-#f0ed-preset-sep { width: 1px; height: 16px; background: #2d2d4e; margin: 0 2px; }
-#f0ed-preset-sep2 { width: 1px; height: 16px; background: #2d2d4e; margin: 0 2px; }
-#f0ed-preset-status { color: #666699; font-size: 10px; margin-left: 4px; }
 </style>
 
 <div id="f0ed-root">
@@ -726,22 +623,6 @@ def build_f0_editor_html() -> str:
   <div id="f0ed-statusbar">
     <div id="f0ed-status-left">Waiting for F0 data…</div>
     <div id="f0ed-status-right">Time: <span id="f0ed-cur-time">–</span> s &nbsp;|&nbsp; Freq: <span id="f0ed-cur-freq">–</span> Hz &nbsp;|&nbsp; Note: <span id="f0ed-cur-note">–</span></div>
-  </div>
-
-  <!-- ── Preset bar ─────────────────────────────────────────────────────── -->
-  <div id="f0ed-presetbar">
-    <label>Saved:</label>
-    <select id="f0ed-preset-select" title="Select a saved preset">
-      <option value="">- no presets saved -</option>
-    </select>
-    <button id="f0ed-preset-load" title="Apply selected preset to the current curve (resampled to song length)">▶ Load</button>
-    <div id="f0ed-preset-sep"></div>
-    <button id="f0ed-preset-import" title="Import a .csv file from disk into the editor (also saves it to presets)">📂 Import File</button>
-    <input type="file" id="f0ed-preset-file-input" accept=".csv" style="display:none" />
-    <div id="f0ed-preset-sep2"></div>
-    <input type="text" id="f0ed-preset-name" placeholder="Preset name…" title="Name for the new preset" maxlength="64" />
-    <button id="f0ed-preset-save" title="Save current curve as a named preset">💾 Save Preset</button>
-    <span id="f0ed-preset-status"></span>
   </div>
 
   <!-- ── Info modal ─────────────────────────────────────────────────────── -->
@@ -2745,192 +2626,6 @@ class F0Editor {
     }, 200);
   }
 
-  // ── Preset helpers ────────────────────────────────────────────────────────
-  // Communication via two hidden Gradio textboxes:
-  //   #f0ed_preset_cmd    - JS writes command JSON → Python handles → writes result
-  //   #f0ed_preset_result - Python writes result JSON → JS reads via MutationObserver
-
-  _writePresetCmd(payload) {
-    const el = document.querySelector('#f0ed_preset_cmd textarea');
-    if (!el) { console.warn('[F0Editor] preset_cmd textarea not found'); return; }
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, 'value'
-    ).set;
-    setter.call(el, JSON.stringify({ ...payload, _t: Date.now() }));
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  _setPresetStatus(msg, isError = false) {
-    const el = document.getElementById('f0ed-preset-status');
-    if (!el) return;
-    el.textContent = msg;
-    el.style.color = isError ? '#ff6677' : '#66bb88';
-    if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
-  }
-
-  _refreshPresetList(names) {
-    const sel = document.getElementById('f0ed-preset-select');
-    if (!sel) return;
-    const prev = sel.value;
-    sel.innerHTML = '';
-    if (!names || names.length === 0) {
-      sel.innerHTML = '<option value="">- no presets saved -</option>';
-    } else {
-      names.forEach(n => {
-        const opt = document.createElement('option');
-        opt.value = n; opt.textContent = n;
-        sel.appendChild(opt);
-      });
-      // Restore previous selection if still present
-      if (names.includes(prev)) sel.value = prev;
-    }
-  }
-
-  savePreset() {
-    if (!this.currentF0.length) { this._setPresetStatus('No curve loaded', true); return; }
-    const nameEl = document.getElementById('f0ed-preset-name');
-    const name   = (nameEl ? nameEl.value : '').trim();
-    if (!name) { this._setPresetStatus('Enter a name first', true); return; }
-    this._writePresetCmd({
-      action: 'save',
-      name:   name,
-      freqs:  Array.from(this.currentF0),
-    });
-    this._setPresetStatus('Saving...');
-  }
-
-  loadPreset() {
-    const sel  = document.getElementById('f0ed-preset-select');
-    const name = sel ? sel.value : '';
-    if (!name) { this._setPresetStatus('Select a preset first', true); return; }
-    this._writePresetCmd({ action: 'load', name });
-    this._setPresetStatus('Loading...');
-  }
-
-  importPreset() {
-    const fi = document.getElementById('f0ed-preset-file-input');
-    if (fi) fi.click();
-  }
-
-  _onPresetFileChosen(file) {
-    if (!file) return;
-    const stem = file.name.replace(/\.csv$/i, '').trim() || 'imported';
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text  = e.target.result || '';
-      const freqs = [];
-      for (const line of text.split(/\r?\n/)) {
-        const v = parseFloat(line.trim());
-        if (!isNaN(v)) freqs.push(v);
-      }
-      if (!freqs.length) { this._setPresetStatus('No valid freq data in file', true); return; }
-      this._applyPresetFreqs(freqs);
-      this._setPresetStatus('Applying...');
-      this._writePresetCmd({ action: 'save', name: stem, freqs });
-    };
-    reader.onerror = () => this._setPresetStatus('Could not read file', true);
-    reader.readAsText(file);
-  }
-
-  _handlePresetResult(resultJson) {
-    let res;
-    try { res = JSON.parse(resultJson); } catch { return; }
-    if (!res) return;
-
-    if (res.action === 'save') {
-      if (res.ok) {
-        this._refreshPresetList(res.names || []);
-        // Auto-select the just-saved preset
-        const nameEl = document.getElementById('f0ed-preset-name');
-        if (nameEl) {
-          const sel = document.getElementById('f0ed-preset-select');
-          if (sel) sel.value = nameEl.value.trim();
-        }
-        this._setPresetStatus('Preset saved');
-      } else {
-        this._setPresetStatus((res.error || 'Save failed'), true);
-      }
-    } else if (res.action === 'load') {
-      if (res.ok && res.freqs && res.freqs.length > 0) {
-        this._applyPresetFreqs(res.freqs);
-        this._setPresetStatus('Preset loaded');
-      } else {
-        this._setPresetStatus((res.error || 'Load failed'), true);
-      }
-    } else if (res.action === 'list') {
-      this._refreshPresetList(res.names || []);
-    }
-  }
-
-  _applyPresetFreqs(presetFreqs) {
-    const n    = this.currentF0.length;
-    const pLen = presetFreqs.length;
-    if (!n || !pLen) return;
-
-    let result;
-    if (pLen === n) {
-      // Same song - copy 1:1, no resampling needed
-      result = Float32Array.from(presetFreqs);
-    } else {
-      // Different song length - linear resample to fit
-      result = new Float32Array(n);
-      for (let i = 0; i < n; i++) {
-        const t  = (i / (n - 1)) * (pLen - 1);
-        const lo = Math.floor(t), hi = Math.min(lo + 1, pLen - 1);
-        const fLo = presetFreqs[lo], fHi = presetFreqs[hi];
-        if (fLo <= 0) {
-          result[i] = 0;
-        } else if (fHi <= 0 || lo === hi) {
-          result[i] = fLo;
-        } else {
-          result[i] = fLo + (fHi - fLo) * (t - lo);
-        }
-      }
-    }
-    this.currentF0 = result;
-    this._pushHistory();
-    this._renderAll();
-    this._syncToGradio();
-  }
-
-  _bindPresets() {
-    document.getElementById('f0ed-preset-save')
-      ?.addEventListener('click', () => this.savePreset());
-    document.getElementById('f0ed-preset-load')
-      ?.addEventListener('click', () => this.loadPreset());
-    document.getElementById('f0ed-preset-import')
-      ?.addEventListener('click', () => this.importPreset());
-
-    // File input: fires when user picks a file
-    const fi = document.getElementById('f0ed-preset-file-input');
-    if (fi) {
-      fi.addEventListener('change', () => {
-        if (fi.files && fi.files[0]) this._onPresetFileChosen(fi.files[0]);
-        fi.value = ''; // reset so the same file can be re-imported
-      });
-    }
-
-    // Watch #f0ed_preset_result for Python responses
-    const attachResultObserver = () => {
-      const el = document.querySelector('#f0ed_preset_result textarea');
-      if (!el) { setTimeout(attachResultObserver, 500); return; }
-      let lastSeen = '';
-      const handle = (val) => {
-        if (!val || val === lastSeen) return;
-        lastSeen = val;
-        this._handlePresetResult(val);
-        // Reset so the same result JSON can fire again (e.g. reloading the same preset)
-        lastSeen = '';
-      };
-      handle(el.value);
-      const mo = new MutationObserver(() => handle(el.value));
-      mo.observe(el, { attributes: true, childList: true, subtree: true, characterData: true });
-      el.addEventListener('input', () => handle(el.value));
-    };
-    attachResultObserver();
-
-    // Initial preset list load
-    this._writePresetCmd({ action: 'list' });
   } // end class F0Editor
 }
 
@@ -2943,8 +2638,6 @@ function ensureEditor() {
   if (editorInstance) return true;
   try {
     editorInstance = new F0Editor();
-    // Wire up preset bar after editor is constructed
-    editorInstance._bindPresets();
     return true;
   }
   catch(e) { console.error('[F0Editor] init failed:', e); return false; }
