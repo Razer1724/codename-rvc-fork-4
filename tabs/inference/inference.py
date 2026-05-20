@@ -23,9 +23,6 @@ from tabs.inference.f0_editor_component import (
     build_f0_editor_html,
     build_f0_editor_js,
     cleanup_old_temp_f0,
-    list_f0_presets,
-    save_f0_preset,
-    load_f0_preset,
 )
 
 now_dir = os.getcwd()
@@ -36,9 +33,6 @@ audio_root = os.path.join(now_dir, "assets", "audios")
 custom_embedder_root = os.path.join(
     now_dir, "rvc", "models", "embedders", "embedders_custom"
 )
-
-PRESETS_DIR = os.path.join(now_dir, "assets", "presets")
-FORMANTSHIFT_DIR = os.path.join(now_dir, "assets", "formant_shift")
 
 os.makedirs(custom_embedder_root, exist_ok=True)
 
@@ -95,86 +89,6 @@ custom_embedders = [
     for dirpath, dirnames, _ in os.walk(custom_embedder_root_relative)
     for dirname in dirnames
 ]
-
-
-def update_sliders(preset):
-    with open(
-        os.path.join(PRESETS_DIR, f"{preset}.json"), "r", encoding="utf-8"
-    ) as json_file:
-        values = json.load(json_file)
-    return (
-        values["pitch"],
-        values["filter_radius"],
-        values["index_rate"],
-        values["rms_mix_rate"],
-        values["protect"],
-    )
-
-
-def update_sliders_formant(preset):
-    with open(
-        os.path.join(FORMANTSHIFT_DIR, f"{preset}.json"), "r", encoding="utf-8"
-    ) as json_file:
-        values = json.load(json_file)
-    return (
-        values["formant_qfrency"],
-        values["formant_timbre"],
-    )
-
-
-def export_presets(presets, file_path):
-    with open(file_path, "w", encoding="utf-8") as json_file:
-        json.dump(presets, json_file, ensure_ascii=False, indent=4)
-
-
-def import_presets(file_path):
-    with open(file_path, "r", encoding="utf-8") as json_file:
-        presets = json.load(json_file)
-    return presets
-
-
-def get_presets_data(pitch, filter_radius, index_rate, rms_mix_rate, protect):
-    return {
-        "pitch": pitch,
-        "filter_radius": filter_radius,
-        "index_rate": index_rate,
-        "rms_mix_rate": rms_mix_rate,
-        "protect": protect,
-    }
-
-
-def export_presets_button(
-    preset_name, pitch, filter_radius, index_rate, rms_mix_rate, protect
-):
-    if preset_name:
-        file_path = os.path.join(PRESETS_DIR, f"{preset_name}.json")
-        presets_data = get_presets_data(
-            pitch, filter_radius, index_rate, rms_mix_rate, protect
-        )
-        with open(file_path, "w", encoding="utf-8") as json_file:
-            json.dump(presets_data, json_file, ensure_ascii=False, indent=4)
-        return "Export successful"
-    return "Export cancelled"
-
-
-def import_presets_button(file_path):
-    if file_path:
-        imported_presets = import_presets(file_path.name)
-        return (
-            list(imported_presets.keys()),
-            imported_presets,
-            "Presets imported successfully!",
-        )
-    return [], {}, "No file selected for import."
-
-
-def list_json_files(directory):
-    return [f.rsplit(".", 1)[0] for f in os.listdir(directory) if f.endswith(".json")]
-
-
-def refresh_presets():
-    json_files = list_json_files(PRESETS_DIR)
-    return gr.update(choices=json_files)
 
 
 def output_path_fn(input_audio_path):
@@ -321,11 +235,6 @@ def create_folder_and_move_files(folder_name, bin_file, config_file):
         shutil.copy(config_file, os.path.join(target_folder, os.path.basename(config_file)))
 
     return f"Files moved to folder {target_folder}"
-
-
-def refresh_formant():
-    json_files = list_json_files(FORMANTSHIFT_DIR)
-    return gr.update(choices=json_files)
 
 
 def refresh_embedders_folders():
@@ -575,45 +484,6 @@ def inference_tab():
                 sid, seed, uvmp_submodel,
             )
 
-        def handle_preset_cmd(cmd_json: str) -> str:
-            """
-            Called whenever JS writes a command to the preset_cmd_box.
-            Commands: {"action":"list"} | {"action":"save","name":str,"freqs":[...]}
-                    | {"action":"load","name":str}
-            Returns a result JSON string for JS to consume.
-            _t is echoed back so the result textarea always gets a unique value,
-            ensuring the MutationObserver fires even when the payload is identical.
-            """
-            if not cmd_json or not cmd_json.strip():
-                return ""
-            try:
-                cmd = json.loads(cmd_json)
-            except Exception:
-                return json.dumps({"ok": False, "error": "bad JSON"})
-
-            action = cmd.get("action", "")
-            _t = cmd.get("_t", 0) # echo timestamp back so result is always unique
-
-            if action == "list":
-                return json.dumps({"action": "list", "ok": True, "names": list_f0_presets(), "_t": _t})
-
-            elif action == "save":
-                name = cmd.get("name", "").strip()
-                freqs_json = json.dumps(cmd.get("freqs", []))
-                result = json.loads(save_f0_preset(name, freqs_json))
-                result["action"] = "save"
-                result["_t"] = _t
-                return json.dumps(result)
-
-            elif action == "load":
-                name = cmd.get("name", "").strip()
-                result = json.loads(load_f0_preset(name))
-                result["action"] = "load"
-                result["_t"] = _t
-                return json.dumps(result)
-
-            return json.dumps({"ok": False, "error": f"unknown action: {action}", "_t": _t})
-
         def on_model_change(model_path):
             """
             Handles UI changes for .pth and .uvmp voice model selection.
@@ -764,17 +634,7 @@ def inference_tab():
                     interactive=True,
                 )
                 with gr.Row(visible=False) as formant_row:
-                    formant_preset = gr.Dropdown(
-                        label="Browse presets for formant shifting",
-                        info="Presets are located in '/assets/formant_shift' folder.",
-                        choices=list_json_files(FORMANTSHIFT_DIR),
-                        visible=False,
-                        interactive=True,
-                    )
-                    formant_refresh_button = gr.Button(
-                        value="Refresh",
-                        visible=False,
-                    )
+                    pass
                 formant_qfrency = gr.Slider(
                     value=1.0,
                     info="Controls the quefrency used for formant shifting. Default is 1.0.",
@@ -1104,34 +964,6 @@ def inference_tab():
                     interactive=True,
                     visible=False,
                 )
-                with gr.Accordion("Preset Settings", open=False):
-                    with gr.Row():
-                        preset_dropdown = gr.Dropdown(
-                            label="Select Custom Preset",
-                            choices=list_json_files(PRESETS_DIR),
-                            interactive=True,
-                        )
-                        presets_refresh_button = gr.Button("Refresh Presets")
-                    import_file = gr.File(
-                        label="Select file to import",
-                        file_count="single",
-                        type="filepath",
-                        interactive=True,
-                    )
-                    import_file.change(
-                        import_presets_button,
-                        inputs=import_file,
-                        outputs=[preset_dropdown],
-                    )
-                    presets_refresh_button.click(
-                        refresh_presets, outputs=preset_dropdown
-                    )
-                    with gr.Row():
-                        preset_name_input = gr.Textbox(
-                            label="Preset Name",
-                            placeholder="Enter preset name",
-                        )
-                        export_button = gr.Button("Export Preset")
                 pitch = gr.Slider(
                     minimum=-24,
                     maximum=24,
@@ -1174,28 +1006,6 @@ def inference_tab():
                     info="Safeguard distinct consonants and breathing sounds to prevent electric / buzz, tearing and other artifacts. \n Setting it to its max value of 0.5 offers comprehensive protection.\n ***Generally speaking, higher it is potentially lower the index accuracy.***",
                     value=0.33,
                     interactive=True,
-                )
-                preset_dropdown.change(
-                    update_sliders,
-                    inputs=preset_dropdown,
-                    outputs=[
-                        pitch,
-                        filter_radius,
-                        index_rate,
-                        rms_mix_rate,
-                        protect,
-                    ],
-                )
-                export_button.click(
-                    export_presets_button,
-                    inputs=[
-                        preset_name_input,
-                        pitch,
-                        filter_radius,
-                        index_rate,
-                        rms_mix_rate,
-                        protect,
-                    ],
                 )
                 f0_method = gr.Radio(
                     label="Pitch extraction algorithm",
@@ -1275,21 +1085,6 @@ def inference_tab():
                         elem_id="edited_f0_output",
                         label="Edited F0 JSON",
                     )
-                    # Preset communication channel: JS writes cmd JSON here
-                    preset_cmd_box = gr.Textbox(
-                        value="",
-                        visible="hidden",
-                        elem_id="f0ed_preset_cmd",
-                        label="Preset Command",
-                    )
-                    # Python writes result JSON here; JS MutationObserver picks it up
-                    preset_result_box = gr.Textbox(
-                        value="",
-                        visible="hidden",
-                        elem_id="f0ed_preset_result",
-                        label="Preset Result",
-                    )
-
                     # The canvas editor panel ( hidden until extraction completes )
                     with gr.Column(visible=False) as f0_editor_panel:
                         gr.HTML(value=build_f0_editor_html(), js_on_load=build_f0_editor_js(), elem_id="f0_editor_html")
@@ -1413,17 +1208,7 @@ def inference_tab():
                     interactive=True,
                 )
                 with gr.Row(visible=False) as formant_row_batch:
-                    formant_preset_batch = gr.Dropdown(
-                        label="Browse presets for formanting",
-                        info="Presets are located in /assets/formant_shift folder",
-                        choices=list_json_files(FORMANTSHIFT_DIR),
-                        visible=False,
-                        interactive=True,
-                    )
-                    formant_refresh_button_batch = gr.Button(
-                        value="Refresh",
-                        visible=False,
-                    )
+                    pass
                 formant_qfrency_batch = gr.Slider(
                     value=1.0,
                     info="Default value is 1.0",
@@ -1797,29 +1582,6 @@ def inference_tab():
                     value=0.3,
                     interactive=True,
                 )
-                preset_dropdown.change(
-                    update_sliders,
-                    inputs=preset_dropdown,
-                    outputs=[
-                        pitch_batch,
-                        filter_radius_batch,
-                        index_rate_batch,
-                        rms_mix_rate_batch,
-                        protect_batch,
-                    ],
-                )
-                export_button.click(
-                    export_presets_button,
-                    inputs=[
-                        preset_name_input,
-                        pitch,
-                        filter_radius,
-                        index_rate,
-                        rms_mix_rate,
-                        protect,
-                    ],
-                    outputs=[],
-                )
                 f0_method_batch = gr.Radio(
                     label="Pitch extraction algorithm",
                     info="Pitch extraction algorithm to use for the audio conversion. The default algorithm is rmvpe, which is ***recommended for most cases.***",
@@ -1919,13 +1681,9 @@ def inference_tab():
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
             )
         else:
             return (
-                gr.update(visible=False),
-                gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
@@ -1985,42 +1743,17 @@ def inference_tab():
         inputs=[formant_shifting],
         outputs=[
             formant_row,
-            formant_preset,
-            formant_refresh_button,
             formant_qfrency,
             formant_timbre,
         ],
     )
     formant_shifting_batch.change(
         fn=toggle_visible_formant_shifting,
-        inputs=[formant_shifting],
+        inputs=[formant_shifting_batch],
         outputs=[
             formant_row_batch,
-            formant_preset_batch,
-            formant_refresh_button_batch,
             formant_qfrency_batch,
             formant_timbre_batch,
-        ],
-    )
-    formant_refresh_button.click(
-        fn=refresh_formant,
-        inputs=[],
-        outputs=[formant_preset],
-    )
-    formant_preset.change(
-        fn=update_sliders_formant,
-        inputs=[formant_preset],
-        outputs=[
-            formant_qfrency,
-            formant_timbre,
-        ],
-    )
-    formant_preset_batch.change(
-        fn=update_sliders_formant,
-        inputs=[formant_preset_batch],
-        outputs=[
-            formant_qfrency,
-            formant_timbre,
         ],
     )
     post_process.change(
@@ -2219,12 +1952,6 @@ def inference_tab():
           f0_editor_cache,
         ],
     )
-    preset_cmd_box.change(
-        fn=handle_preset_cmd,
-        inputs=[preset_cmd_box],
-        outputs=[preset_result_box],
-    )
-
     audio.change(
         fn=on_audio_change,
         inputs=[audio, f0_editor_cache],
