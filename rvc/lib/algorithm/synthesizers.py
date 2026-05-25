@@ -1,16 +1,16 @@
+import math
 import torch
 from typing import Optional, List
 import random
 
+from rvc.lib.algorithm import generators
 from rvc.lib.algorithm.commons import slice_segments, rand_slice_segments
 from rvc.lib.algorithm.normalizing_flows import ResidualCouplingBlock, ResidualCouplingTransformersBlock
 from rvc.lib.algorithm.encoders import PosteriorEncoder # Posterior encoder, shared between Vits1 and Vits2
 from rvc.lib.algorithm.encoders_vits2 import TextEncoder_VITS2
 from rvc.lib.algorithm.encoders import TextEncoder as TextEncoder_VITS1
 
-
 debug_shapes = False
-
 
 class Synthesizer(torch.nn.Module):
     def __init__(
@@ -49,103 +49,69 @@ class Synthesizer(torch.nn.Module):
         self.use_f0 = use_f0
         self.vocoder = vocoder
         self.vits2_mode = vits2_mode
+        self.sr = sr
 
+
+        # ------   [ TextEncoder ] Maps extracted features to latent space (p)   ----------------------------------------------------
+        enc_p_kwargs = {
+            "out_channels": inter_channels,
+            "hidden_channels": hidden_channels,
+            "filter_channels": filter_channels,
+            "n_heads": n_heads,
+            "n_layers": n_layers,
+            "kernel_size": kernel_size,
+            "p_dropout": p_dropout,
+            "embedding_dim": text_enc_hidden_dim,
+            "f0": use_f0,
+        }
         if vits2_mode:
-            self.enc_p = TextEncoder_VITS2(
-                inter_channels,
-                hidden_channels,
-                filter_channels,
-                n_heads,
-                n_layers,
-                kernel_size,
-                p_dropout,
-                text_enc_hidden_dim,
-                f0=use_f0,
-                gin_channels=gin_channels,
-            )
+            enc_p_kwargs["gin_channels"] = gin_channels # Vits2 TextEncoder needs gin channels since it's speaker-conditioned
+            TextEncoderClass = TextEncoder_VITS2
         else:
-            self.enc_p = TextEncoder_VITS1(
-                inter_channels,
-                hidden_channels,
-                filter_channels,
-                n_heads,
-                n_layers,
-                kernel_size,
-                p_dropout,
-                text_enc_hidden_dim,
-                f0=use_f0,
-            )
-        if use_f0:
-            if vocoder == "RefineGAN":
-                from rvc.lib.algorithm.generators import RefineGANGenerator
-                self.dec = RefineGANGenerator(
-                    sample_rate=sr,
-                    downsample_rates=upsample_rates[::-1],
-                    upsample_rates=upsample_rates,
-                    start_channels=16,
-                    num_mels=inter_channels,
-                    checkpointing=checkpointing,
-                )
-                print("    ██████  Vocoder: RefineGAN")
-            elif vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                from rvc.lib.algorithm.generators import RingFormerGeneratorPrior
-                self.dec = RingFormerGeneratorPrior(
-                    initial_channel=inter_channels,
-                    resblock_kernel_sizes=resblock_kernel_sizes,
-                    resblock_dilation_sizes=resblock_dilation_sizes,
-                    upsample_rates=upsample_rates,
-                    upsample_initial_channel=upsample_initial_channel,
-                    upsample_kernel_sizes=upsample_kernel_sizes,
-                    gen_istft_n_fft=gen_istft_n_fft,
-                    gen_istft_hop_size=gen_istft_hop_size,
-                    gin_channels=gin_channels,
-                    sr=sr,
-                    checkpointing=checkpointing,
-                )
-                print(f"    ██████  Vocoder: {vocoder}")
-            elif vocoder == "APEX-GAN":
-                from rvc.lib.algorithm.generators import APEX_GAN_Generator
-                self.dec = APEX_GAN_Generator(
-                    inter_channels,
-                    resblock_kernel_sizes,
-                    resblock_dilation_sizes,
-                    upsample_rates,
-                    upsample_initial_channel,
-                    upsample_kernel_sizes,
-                    gin_channels=gin_channels,
-                    sr=sr,
-                )
-                print("    ██████  Vocoder: APEX-GAN")
-            else:  # vocoder == "HiFi-GAN"
-                from rvc.lib.algorithm.generators import HiFiGANNSFGenerator
-                self.dec = HiFiGANNSFGenerator(
-                    inter_channels,
-                    resblock_kernel_sizes,
-                    resblock_dilation_sizes,
-                    upsample_rates,
-                    upsample_initial_channel,
-                    upsample_kernel_sizes,
-                    gin_channels=gin_channels,
-                    sr=sr,
-                    checkpointing=checkpointing,
-                )
+            TextEncoderClass = TextEncoder_VITS1
+
+        self.enc_p = TextEncoderClass(**enc_p_kwargs)
+
+
+        # ------   [ Decoder / Vocoder ] Reconstructs audio from latents (z)   ------------------------------------------------------
+        vocoder_map = {
+            "RefineGAN": generators.RefineGANGenerator,
+            "RingFormer_v1": generators.RingFormerGenerator,
+            "RingFormer_v2": generators.RingFormerGenerator,
+            "APEX-GAN": generators.APEX_GAN_Generator,
+            "HiFi-GAN": generators.HiFiGANNSFGenerator if use_f0 else generators.HiFiGANGenerator
+        }
+
+        dec_kwargs = {
+            "initial_channel": inter_channels,
+            "resblock_kernel_sizes": resblock_kernel_sizes,
+            "resblock_dilation_sizes": resblock_dilation_sizes,
+            "upsample_rates": upsample_rates,
+            "upsample_initial_channel": upsample_initial_channel,
+            "upsample_kernel_sizes": upsample_kernel_sizes,
+            "gin_channels": gin_channels,
+            "sr": sr,
+            "checkpointing": checkpointing,
+        }
+
+        if not use_f0 and vocoder != "HiFi-GAN":
+            print(f"!!! Warning: {vocoder} does not support training without pitch guidance.")
+            self.dec = None
+        else:
+            GeneratorClass = vocoder_map.get(vocoder, generators.HiFiGANNSFGenerator)
+
+            if vocoder in ["RingFormer_v1", "RingFormer_v2"]: # RingFormer needs inverse stft params
+                dec_kwargs.update({"gen_istft_n_fft": gen_istft_n_fft, "gen_istft_hop_size": gen_istft_hop_size})
+
+            self.dec = GeneratorClass(**dec_kwargs)
+
+            if use_f0 and vocoder == "HiFi-GAN":
                 print("    ██████  Vocoder: NSF-HiFi-GAN")
-        else:
-            if vocoder in ["RefineGAN", "RingFormer_v1", "RingFormer_v2", "APEX-GAN"]:
-                print(f"{vocoder} does not support training without pitch guidance.")
-                self.dec = None
-            else: # vocoder == "HiFi-GAN"
-                from rvc.lib.algorithm.generators import HiFiGANGenerator
-                self.dec = HiFiGANGenerator(
-                    inter_channels,
-                    resblock_kernel_sizes,
-                    resblock_dilation_sizes,
-                    upsample_rates,
-                    upsample_initial_channel,
-                    upsample_kernel_sizes,
-                    gin_channels=gin_channels,
-                    checkpointing=checkpointing,
-                )
+            else:
+                print(f"    ██████  Vocoder: {vocoder}")
+
+
+        # ------   [ Posterior Encoder ] Extracts latents (z) from target audio (training only)   -----------------------------------
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -155,26 +121,22 @@ class Synthesizer(torch.nn.Module):
             16,
             gin_channels=gin_channels,
         )
-        if vits2_mode:
-            self.flow = ResidualCouplingTransformersBlock(
-                inter_channels,
-                hidden_channels,
-                5,
-                1,
-                3,
-                gin_channels=gin_channels,
-            )
-        else:
-            self.flow = ResidualCouplingBlock(
-                inter_channels,
-                hidden_channels,
-                5,
-                1,
-                3,
-                gin_channels=gin_channels,
-            )
 
+
+        # ------   [ Flow ] Reversible transformation between content priors (p) and speaker-conditioned latents (z)   --------------
+        FlowClass = ResidualCouplingTransformersBlock if vits2_mode else ResidualCouplingBlock
+        self.flow = FlowClass(
+            inter_channels,
+            hidden_channels,
+            5,
+            1,
+            3,
+            gin_channels=gin_channels,
+        )
+
+        # ------   [ Speaker Embedding ] Maps identity to global conditioning (g)   -------------------------------------------------
         self.emb_g = torch.nn.Embedding(spk_embed_dim, gin_channels)
+
 
     def _remove_weight_norm_from(self, module):
         """Utility to remove weight normalization from a module."""
@@ -197,8 +159,8 @@ class Synthesizer(torch.nn.Module):
         phone_lengths: torch.Tensor,
         pitch: Optional[torch.Tensor] = None,
         pitchf: Optional[torch.Tensor] = None,
-        spec: Optional[torch.Tensor] = None, # y
-        spec_lengths: Optional[torch.Tensor] = None, # y_lengths
+        spec: Optional[torch.Tensor] = None,
+        spec_lengths: Optional[torch.Tensor] = None,
         ds: Optional[torch.Tensor] = None,
     ):
         """
@@ -209,8 +171,8 @@ class Synthesizer(torch.nn.Module):
             phone_lengths (torch.Tensor): Lengths of the phoneme sequences.
             pitch (torch.Tensor, optional): Pitch sequence.
             pitchf (torch.Tensor, optional): Fine-grained pitch sequence.
-            spek (torch.Tensor, optional): Target spectrogram.  - y
-            spek_lengths (torch.Tensor, optional): Lengths of the target spectrograms. - y_lengths
+            spec (torch.Tensor, optional): Target spectrogram.
+            spec_lengths (torch.Tensor, optional): Lengths of the target spectrograms ( linear specs ).
             ds (torch.Tensor, optional): Speaker embedding.
         """
         g = self.emb_g(ds).unsqueeze(-1)
@@ -259,6 +221,7 @@ class Synthesizer(torch.nn.Module):
             print(" NONE SPEC ")
             return None, None, x_mask, None, (None, None, m_p, logs_p, None, None)
 
+
     @torch.jit.export
     def infer(
         self,
@@ -268,7 +231,6 @@ class Synthesizer(torch.nn.Module):
         nsff0: Optional[torch.Tensor] = None,
         sid: torch.Tensor = None,
         seed: int = 0,
-        rate: Optional[torch.Tensor] = None,
     ):
         """
         Inference of the model.
@@ -279,9 +241,15 @@ class Synthesizer(torch.nn.Module):
             pitch (torch.Tensor, optional): Pitch sequence.
             nsff0 (torch.Tensor, optional): Fine-grained pitch sequence.
             sid (torch.Tensor): Speaker embedding.
-            rate (torch.Tensor, optional): Rate for time-stretching.
             seed (int, optional): Seed for randomization of noise.
+            
         """
+
+        # Seed handler
+        if seed != 0:
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+
         g = self.emb_g(sid).unsqueeze(-1)
 
         if self.vits2_mode:
@@ -289,29 +257,19 @@ class Synthesizer(torch.nn.Module):
         else:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
-        # Seed handler - receiver
-        if seed != 0:
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-
-        if rate is not None:
-            head = int(z_p.shape[2] * (1.0 - rate.item()))
-            z_p, x_mask = z_p[:, :, head:], x_mask[:, :, head:]
-
-            if self.use_f0 and nsff0 is not None:
-                nsff0 = nsff0[:, head:]
-
         z = self.flow(z_p, x_mask, g=g, reverse=True)
 
         if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-            o, _, _ = self.dec(z * x_mask, nsff0, g=g)
+            o, _, _ = self.dec(z * x_mask, nsff0, g)
+
         elif self.vocoder == "APEX-GAN":
-            o = (self.dec(z * x_mask, nsff0, g=g, return_intermediates=False) if self.use_f0 else self.dec(z * x_mask, g=g, return_intermediates=False))
+            o = (self.dec(z * x_mask, nsff0, g, return_intermediates=False) if self.use_f0 else self.dec(z * x_mask, g=g, return_intermediates=False))
+
         elif self.vocoder == "RefineGAN":
-            o = (self.dec(z * x_mask, nsff0, g=g) if self.use_f0 else self.dec(z * x_mask, g=g))
+            o = (self.dec(z * x_mask, nsff0, g) if self.use_f0 else self.dec(z * x_mask, g=g))
+
         else: # HiFi-GAN
-            o = (self.dec(z * x_mask, nsff0, g=g) if self.use_f0 else self.dec(z * x_mask, g=g))
+            o = (self.dec(z * x_mask, nsff0, g) if self.use_f0 else self.dec(z * x_mask, g=g))
 
         return o, x_mask, (z, z_p, m_p, logs_p)

@@ -265,16 +265,13 @@ class VoiceConverter:
             start_time = time.time()
             print(f"Converting audio '{audio_input_path}'...")
 
-            audio = load_audio_infer(
-                audio_input_path,
-                16000,
-                **kwargs,
-            )
+            # Loading the input audio and downsample to 16khz
+            audio = load_audio_infer(audio_input_path, 16000, **kwargs)
             audio_max = np.abs(audio).max() / 0.95
-
             if audio_max > 1:
                 audio /= audio_max
 
+            # Load in the feature embedder model
             if not self.hubert_model or embedder_model != self.last_embedder_model:
                 self.load_hubert(embedder_model, embedder_model_custom)
                 self.last_embedder_model = embedder_model
@@ -297,6 +294,7 @@ class VoiceConverter:
             else:
                 chunks = [audio]
 
+            # Seed handling
             if seed != 0:
                 torch.manual_seed(seed)
                 torch.cuda.manual_seed_all(seed)
@@ -309,7 +307,10 @@ class VoiceConverter:
                 torch.cuda.manual_seed_all(seed)
                 print(f"[INFER] Randomized seed exposed for reproduction: {seed}")
 
+
+            # Collect chunked inference outputs ( if chunking's used )
             converted_chunks = []
+            # Inference
             for c in chunks:
                 audio_opt = self.vc.pipeline(
                     model=self.hubert_model,

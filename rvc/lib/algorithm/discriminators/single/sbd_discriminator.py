@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn import Conv1d
 from torch.nn.utils import weight_norm, spectral_norm
 
-from rvc.lib.algorithm.discriminators.pqmf import PQMF
+from rvc.lib.algorithm.discriminators.multi.pqmf import PQMF
 
 
 def _get_padding(kernel_size: int, dilation: int = 1) -> int:

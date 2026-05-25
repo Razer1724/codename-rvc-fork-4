@@ -65,12 +65,12 @@ from utils import (
     print_init_setup,
     train_loader_safety,
     verify_spk_dim,
-    early_stopper,
-    WeightTrajectoryVisualizer
+    early_stopper
 )
 from losses import (
     discriminator_loss,
     generator_loss,
+    envelope_loss,
     discriminator_tprls_loss,
     generator_tprls_loss,
     HingeAdversarialLoss,
@@ -176,44 +176,13 @@ clip_grad_norm_override_value_g = 100
 clip_grad_norm_override_value_d = 100
 
 # EXPERIMENTAL
-use_trajectory = False
 use_sid_swap = False
 custom_sid = 1
-
 ##################################################################
 
 import logging
 logging.getLogger("torch").setLevel(logging.ERROR)
 
-
-_spectral_loss_buffer = []
-_STABILITY_WINDOW = 30
-_STABILITY_CHECK_EVERY = 10  # check every 10 steps
-
-def check_loss_stability(value: float, step: int) -> None:
-    _spectral_loss_buffer.append(value)
-    if len(_spectral_loss_buffer) > 100:
-        _spectral_loss_buffer.pop(0)
-
-    if len(_spectral_loss_buffer) >= _STABILITY_WINDOW and step % _STABILITY_CHECK_EVERY == 0:
-        window = np.array(_spectral_loss_buffer[-_STABILITY_WINDOW:])
-        median = np.median(window)
-        std = np.std(window)
-        window = window[np.abs(window - median) < 3 * std]
-        if len(window) < 5:
-            return
-        cv = np.std(window) / (np.mean(window) + 1e-8)
-        mid = len(window) // 2
-        decline = (np.mean(window[:mid]) - np.mean(window[mid:])) / (np.mean(window[:mid]) + 1e-8) * 100
-        if cv < 0.05 and abs(decline) < 1.0:
-            status = "STABLE ✓ — safe to calibrate now"
-        elif cv < 0.10 and abs(decline) < 3.0:
-            status = "PROBABLY STABLE — run ~20 more steps to confirm"
-        elif decline > 3.0:
-            status = f"STILL DECLINING ({decline:.1f}%) — keep measuring"
-        else:
-            status = f"NOISY (CV={cv:.3f}) — keep measuring"
-        print(f"[STABILITY step={step}] {status}")
 
 class NullDiscriminator(nn.Module):
     def __init__(self):
@@ -232,13 +201,16 @@ def univhd_project_gamma(net_d, vocoder, rank, global_step):
     if vocoder != "APEX-GAN":
         return
     disc = net_d.module if hasattr(net_d, "module") else net_d
+    gamma_val = None
     with torch.no_grad():
         for d in disc.discriminators:
             if hasattr(d, "harmonic_filter"):
+                # Clamp the value
                 d.harmonic_filter.gamma.clamp_(min=1.0)
-    if rank == 0 and global_step % 100 == 0:
-        print(f"[UnivHD] gamma: {disc.discriminators[-1].harmonic_filter.gamma.item():.6f}")
-
+                # Store it for printing
+                gamma_val = d.harmonic_filter.gamma.item()
+    if rank == 0 and global_step % 100 == 0 and gamma_val is not None:
+        print(f"[UnivHD] gamma: {gamma_val:.6f}")
 
 class EarlyStopSignalHandler:
     def __init__(self):
@@ -350,20 +322,62 @@ def get_d_model(config, vocoder, use_checkpointing):
             **dict(config.mrd)
         )
     elif vocoder == "APEX-GAN":
-        from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_UnivHD_Combined
-        # CoMBD + SBD + UnivHD ( unified )
-        return CoMBD_SBD_UnivHD_Combined(
+        '''
+        CoMBD + SBD + UnivHD + GLD - TRIALS
+        An experimental ensemble of mine which ( in theory ) is supposed to cover all required domains
+        [ Supposedly stable but effectiveness and actual stability of UnivHD + GLD is still uncertain. ]
+        '''
+        from rvc.lib.algorithm.discriminators.multi import HolisticMultiDomainDiscriminator
+        return HolisticMultiDomainDiscriminator(
             sample_rate=config.data.sample_rate,
             segment_size_samples=config.train.segment_size,
             use_spectral_norm=config.model.use_spectral_norm,
-            use_checkpointing=use_checkpointing,
         )
+
+        '''
+        CoMBD + SBD + UnivHD - TRIALS
+        [ Supposedly stable but effectiveness and actual stability of UnivHD is still uncertain. ]
+        '''
+        # from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_UnivHD_Combined
+        # # CoMBD + SBD + UnivHD ( unified )
+        # return CoMBD_SBD_UnivHD_Combined(
+            # sample_rate=config.data.sample_rate,
+            # segment_size_samples=config.train.segment_size,
+            # use_spectral_norm=config.model.use_spectral_norm,
+        # )
+
+
+        '''
+        Dummy discriminator - only for debugging / isolated generator tests
+        '''
+        # return NullDiscriminator()
+
+
+        '''
+        CoMBD + SBD + MRD preset; Heavy, cannot test it reliably on 12 gig card.
+        '''
+        # from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_MRD_Combined
+        # return CoMBD_SBD_MRD_Combined(
+            # sample_rate=config.data.sample_rate,
+            # segment_size_samples=config.train.segment_size,
+            # use_spectral_norm=config.model.use_spectral_norm,
+            # **dict(config.mrd)
+        # )
+
+
     elif vocoder == "RefineGAN":
-        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined_RefineGan
-        # Trimmed MPD + MSD + MRD ( unified )
-        return MPD_MSD_MRD_Combined_RefineGan(
+        # from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined_RefineGan
+        # # Trimmed MPD + MSD + MRD ( unified )
+        # return MPD_MSD_MRD_Combined_RefineGan(
+            # config.model.use_spectral_norm,
+            # use_checkpointing=use_checkpointing
+        # )
+        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
+        # MPD + MSD + MRD ( unified )
+        return MPD_MSD_MRD_Combined(
             config.model.use_spectral_norm,
-            use_checkpointing=use_checkpointing
+            use_checkpointing=use_checkpointing,
+            **dict(config.mrd)
         )
     else: # For NSF HiFi-GAN
         from rvc.lib.algorithm.discriminators.multi import MPD_MSD_Combined
@@ -386,29 +400,19 @@ def get_optimizers(
 ):
     # Common args for optims
     common_args_g = dict(
-        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_g if use_custom_lr else config.train.learning_rate_g,
         betas=(0.8, 0.99),
         eps=1e-9,
+        weight_decay=0.0,
     )
     common_args_d = dict(
-        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_d if use_custom_lr else config.train.learning_rate_d,
         betas=(0.8, 0.99),
         eps=1e-9,
-    )
-    adamwspd_args_g = dict(
-        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
-        betas=(0.8, 0.99),
-        eps=1e-9,
-        weight_decay=0.5,
-    )
-    adamwspd_args_d = dict(
-        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
-        betas=(0.8, 0.99),
-        eps=1e-9,
-        weight_decay=0.5,
+        weight_decay=0.0,
     )
     radam_args_g = dict(
-        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_g if use_custom_lr else config.train.learning_rate_g,
         betas=(0.8, 0.99),
         eps=1e-9,
         weight_decay=0.01,
@@ -416,7 +420,7 @@ def get_optimizers(
         foreach=True,
     )
     radam_args_d = dict(
-        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_d if use_custom_lr else config.train.learning_rate_d,
         betas=(0.8, 0.99),
         eps=1e-9,
         weight_decay=0.01,
@@ -424,24 +428,24 @@ def get_optimizers(
         foreach=True,
     )
     adabelief_args_g = dict(
-        lr=custom_lr_g if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_g if use_custom_lr else config.train.learning_rate_g,
         betas=(0.8, 0.999),
         eps=1e-16,
-        weight_decay=0.01,
-        weight_decouple=True,
+        weight_decay=0,
+        #weight_decouple=False,
         rectify=True,
         adamc=False,
-        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate, # only used when adamc is enabled
+        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate_g, # only used when adamc is enabled
     )
     adabelief_args_d = dict(
-        lr=custom_lr_d if use_custom_lr else config.train.learning_rate,
+        lr=custom_lr_d if use_custom_lr else config.train.learning_rate_d,
         betas=(0.8, 0.999),
         eps=1e-16,
-        weight_decay=0.01,
-        weight_decouple=True,
+        weight_decay=0,
+        #weight_decouple=False,
         rectify=True,
         adamc=False,
-        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate, # only used when adamc is enabled
+        #lr_max=custom_lr_g if use_custom_lr else config.train.learning_rate_d, # only used when adamc is enabled
     )
     # For exotic optimizers
     ranger_args = dict(
@@ -651,6 +655,7 @@ def prepare_schedulers(optim_g, optim_d, use_warmup, warmup_duration, use_lr_sch
 
     return warmup_scheduler_g, warmup_scheduler_d, scheduler_g, scheduler_d
 
+
 def get_reference_sample(train_loader, device, config):
     reference_path = os.path.join("logs", "reference")
     use_custom_ref = all([
@@ -666,18 +671,29 @@ def get_reference_sample(train_loader, device, config):
         pitch = torch.LongTensor(np.load(os.path.join(reference_path, "ref_f0c.npy"))).unsqueeze(0).to(device)
         pitchf = torch.FloatTensor(np.load(os.path.join(reference_path, "ref_f0f.npy"))).unsqueeze(0).to(device)
 
-        min_len = min(phone.shape[1], pitch.shape[1], pitchf.shape[1])
+        # Measure lengths
+        lengths = [phone.shape[1], pitch.shape[1], pitchf.shape[1]]
+        min_len = min(lengths)
 
-        phone, pitch, pitchf = phone[:, :min_len, :], pitch[:, :min_len], pitchf[:, :min_len]
+        # Trim to min length
+        phone = phone[:, :min_len, :]
+        pitch = pitch[:, :min_len]
+        pitchf = pitchf[:, :min_len]
         phone_lengths = torch.LongTensor([phone.shape[1]]).to(device)
-
         sid = torch.LongTensor([0]).to(device)
-    else:
-        print("[REFERENCE] No custom reference found. Fetching from the first batch of the train_loader.")
 
+    else:
+        print("[REFERENCE] No custom reference found. Fetching from train_loader.")
         info = next(iter(train_loader))
+        # Unpack everything from the loader
         phone, phone_lengths, pitch, pitchf, _, _, _, _, sid = info
-        phone, phone_lengths, pitch, pitchf, sid = phone.to(device), phone_lengths.to(device), pitch.to(device), pitchf.to(device), sid.to(device)
+
+        # Move only the first sample of the batch to device
+        phone = phone[0:1].to(device)
+        phone_lengths = phone_lengths[0:1].to(device)
+        pitch = pitch[0:1].to(device)
+        pitchf = pitchf[0:1].to(device)
+        sid = sid[0:1].to(device)
 
         batch_indices = []
         for batch in train_loader.batch_sampler:
@@ -693,6 +709,10 @@ def get_reference_sample(train_loader, device, config):
         print(f"[REFERENCE] Origin of the ref: {file_name}")
 
     return (phone, phone_lengths, pitch, pitchf, sid, config.train.seed)
+
+
+
+
 
 def main():
     """
@@ -841,10 +861,12 @@ def run(
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
     elif spectral_loss == "Hybrid L1":
         fn_spectral_loss = torch.nn.L1Loss()
-        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, perceptual_weighting=True)
+        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, fmin=5000.0, fmin_weight=0.1)
     elif spectral_loss == "Hybrid MS":
         fn_spectral_loss = MultiScaleMelSpectrogramLoss(sample_rate=sample_rate)
-        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, perceptual_weighting=True)
+        fn_spectral_loss2 = MRSTFTLoss(sample_rate=sample_rate, fmin=5000.0, fmin_weight=0.1)
+    elif spectral_loss == "DEBUG":
+        fn_spectral_loss = MRSTFTLoss(sample_rate=sample_rate, fmin=5000.0, fmin_weight=0.1)
     else:
         print("ERROR: Chosen spectral loss is undefined. Exiting.")
         sys.exit(1)
@@ -879,12 +901,6 @@ def run(
             flush_secs=86400,
             purge_step=global_step + 1
         )
-
-        if use_trajectory:
-            trajectory_tracker = WeightTrajectoryVisualizer(history_limit=100)
-        else:
-            trajectory_tracker = None
-
         block_tensorboard_flush_on_exit(writer_eval)
 
         if global_step != 0:
@@ -954,8 +970,7 @@ def run(
             fn_hinge_loss,
             fn_spectral_loss2,
             hann_window,
-            stopper=stopper,
-            trajectory_tracker=trajectory_tracker
+            stopper=stopper
         )
 
         if use_warmup and epoch <= warmup_duration:
@@ -1005,8 +1020,7 @@ def training_loop(
     fn_hinge_loss=None,
     fn_spectral_loss2=None,
     hann_window=None,
-    stopper=None,
-    trajectory_tracker=None
+    stopper=None
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -1064,7 +1078,7 @@ def training_loop(
 
     if not from_scratch:
         # Tensors init for averaged losses:
-        if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+        if vocoder in ["RingFormer_v1", "RingFormer_v2", "RefineGAN"]:
             tensor_count = 7
         else:
             tensor_count = 6
@@ -1083,6 +1097,8 @@ def training_loop(
     }
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
         avg_rolling_cache["loss_sd"] = deque(maxlen=rolling_loss_steps)
+    elif vocoder == "RefineGAN":
+        avg_rolling_cache["loss_env"] = deque(maxlen=rolling_loss_steps)
 
     use_amp = config.train.fp16_run and device.type == "cuda"
 
@@ -1175,12 +1191,12 @@ def training_loop(
                 scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
                 grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
                 gradscaler.step(optim_d) # Optim step
-                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                #univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
             else:
                 loss_disc.backward() # Loss backward
                 grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
                 optim_d.step() # Optim step
-                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                #univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
 
             # Run discriminator on generated output
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
@@ -1198,28 +1214,30 @@ def training_loop(
                     y_hat_mel = wave_to_mel(config, y_hat, half=train_dtype)
                     loss_spectral = fn_spectral_loss(y_mel, y_hat_mel) * config.train.c_mel
                 elif spectral_loss == "Multi-Scale Mel Loss":
-                    loss_spectral = fn_spectral_loss(y, y_hat) * ( config.train.c_mel / 3.0 + 1 ) # * 16
+                    loss_spectral = fn_spectral_loss(y, y_hat) * config.train.c_mel / 3.0 # * 15
                 elif spectral_loss == "Hybrid L1":
                     # L1 Mel
                     y_mel = wave_to_mel(config, y, half=train_dtype)
                     y_hat_mel = wave_to_mel(config, y_hat, half=train_dtype)
                     loss_l1_mel = fn_spectral_loss(y_mel, y_hat_mel) * config.train.c_mel # * 45
                     # MR-STFT
-                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * 53
+                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * c_stft # 80
                     # Loss
-                    loss_spectral = loss_l1_mel * 0.70 + loss_mrstft * 0.30
+                    loss_spectral = loss_l1_mel + loss_mrstft * 0.50
                 elif spectral_loss == "Hybrid MS":
                     # Multi-Scale el L1
-                    loss_ms_mel = fn_spectral_loss(y, y_hat) * ( config.train.c_mel / 3.0 + 1 ) # * 16
+                    loss_ms_mel = fn_spectral_loss(y, y_hat) * config.train.c_mel / 3.0 # * 15
                     # MR-STFT
-                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * 52
+                    loss_mrstft = fn_spectral_loss2(y_hat.float(), y.float()) * c_stft # 80
                     # Loss
-                    loss_spectral = loss_ms_mel * 0.70 + loss_mrstft * 0.30
-
-
+                    loss_spectral = loss_ms_mel + loss_mrstft * 0.50
 
                 # Feature Matching loss
-                loss_fm = feature_loss(fmap_r, fmap_g)
+                loss_fm = feature_loss(fmap_r, fmap_g) * 2.0
+
+                # Envelope ( Intensity ) loss
+                if vocoder == "RefineGAN":
+                    loss_env = envelope_loss(y, y_hat)
 
                 # Generator loss
                 if adversarial_loss == "lsgan":
@@ -1248,13 +1266,17 @@ def training_loop(
                     loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl # KL ( Kullback–Leibler divergence ) loss
                     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                         loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta + loss_sd
+                    elif vocoder == "RefineGAN":
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_env + loss_kl * kl_beta
                     else:
                         loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
                 else:
                     loss_kl = torch.tensor(0.0, device=device) # KL loss dummy for logs
                     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                         loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_sd
-                    else:
+                    elif vocoder == "RefineGAN":
+                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_env
+                    else: # apex_gan route and other vocoders that aren't the above ones
                         loss_gen_total = loss_adv + loss_fm + loss_spectral
 
             # Generator backward and update:
@@ -1271,6 +1293,7 @@ def training_loop(
                 grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
                 optim_g.step() # Optim step
                 skip_lr_sched = False
+
 
             # Per step exp lr decay for generator
             if not skip_lr_sched: # We skip lr scheduler step if there were nans / infs due to gradscaler's scaling.
@@ -1289,6 +1312,8 @@ def training_loop(
 
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     epoch_loss_tensor[6].add_(loss_sd.detach())
+                elif vocoder == "RefineGAN":
+                    epoch_loss_tensor[6].add_(loss_env.detach())
 
             # Loss accumulation for rolling-avg
             # Grads:
@@ -1457,6 +1482,8 @@ def training_loop(
             }
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 scalar_dict_avg.update({"loss_avg/loss_sd": avg_epoch_loss[6].item()})
+            elif vocoder == "RefineGAN":
+                scalar_dict_avg.update({"loss_avg/loss_env": avg_epoch_loss[6].item()})
 
             summarize(writer=writer, global_step=global_step, scalars=scalar_dict_avg)
             flush_writer(writer, rank)
@@ -1477,15 +1504,6 @@ def training_loop(
 
         # At each epoch save point:
         if epoch % epoch_save_frequency == 0:
-
-            if trajectory_tracker is not None:
-                # Update tracker with current model weights
-                trajectory_tracker.update(net_g, epoch)
-                # Get the PCA image
-                traj_img = trajectory_tracker.get_plot()
-                # Log to TensorBoard
-                if traj_img is not None:
-                    writer.add_image("Training/Weight_Trajectory", traj_img, global_step, dataformats='HWC')
 
             # Inferencing on reference sample
             o = eval_infer(net_g, reference)
@@ -1530,9 +1548,9 @@ def training_loop(
                         pass
 
             # Save Generator checkpoint
-            save_checkpoint(net_g, optim_g, config.train.learning_rate, epoch, g_path, gradscaler)
+            save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler)
             # Save Discriminator checkpoint
-            save_checkpoint(net_d, optim_d, config.train.learning_rate, epoch, d_path, gradscaler)
+            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler)
 
             # Save small weight model
             if save_weight_models:

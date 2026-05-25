@@ -451,7 +451,7 @@ def train_tab():
                     label="Loudness Normalization",
                     info=NORMALIZATION_INFO,
                     choices=["none", "post_peak", "post_peak_rvc", "post_rms"],
-                    value="post_rms",
+                    value="post_peak",
                     interactive=True,
                     visible=True,
                     scale=0.6,

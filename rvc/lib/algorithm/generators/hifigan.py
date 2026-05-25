@@ -34,6 +34,8 @@ class HiFiGANGenerator(torch.nn.Module):
         upsample_initial_channel: int,
         upsample_kernel_sizes: list,
         gin_channels: int = 0,
+        sr: int = 48000, # Unused
+        checkpointing: bool = False, # Unused
     ):
         super(HiFiGANGenerator, self).__init__()
         self.num_kernels = len(resblock_kernel_sizes)

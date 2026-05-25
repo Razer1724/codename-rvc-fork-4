@@ -11,6 +11,7 @@ from torch.optim.optimizer import Optimizer
 
 @triton.autotune(
     configs=[
+        triton.Config({"BLOCK_SIZE": 256}, num_warps=2, num_stages=1),
         triton.Config({"BLOCK_SIZE": 512}, num_warps=4, num_stages=1),
         triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=1),
         triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=1),

@@ -11,7 +11,7 @@ from torch.nn import Conv1d
 from torch.nn.utils import weight_norm
 from torch.nn.utils import spectral_norm
 
-from rvc.lib.algorithm.discriminators.pqmf import PQMF
+from rvc.lib.algorithm.discriminators.multi.pqmf import PQMF
 
 
 class CoMBDBlock(nn.Module):

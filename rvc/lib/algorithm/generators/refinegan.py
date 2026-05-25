@@ -271,7 +271,7 @@ class RefineGANGenerator(nn.Module):
     It can also incorporate global conditioning.
 
     Args:
-        sample_rate (int, optional): Sampling rate of the audio. Defaults to 44100.
+        sr (int, optional): Sampling rate of the audio. Defaults to 44100.
         downsample_rates (tuple[int], optional): Downsampling rates for the downsampling blocks. Defaults to (2, 2, 8, 8).
         upsample_rates (tuple[int], optional): Upsampling rates for the upsampling blocks. Defaults to (8, 8, 2, 2).
         leaky_relu_slope (float, optional): Slope for the Leaky ReLU activation. Defaults to 0.2.
@@ -284,7 +284,7 @@ class RefineGANGenerator(nn.Module):
     def __init__(
         self,
         *,
-        sample_rate: int = 44100,
+        sr: int = 44100,
         downsample_rates: tuple[int] = (2, 2, 8, 8),  # unused
         upsample_rates: tuple[int] = (8, 8, 2, 2),
         leaky_relu_slope: float = 0.2,
@@ -300,7 +300,7 @@ class RefineGANGenerator(nn.Module):
         self.checkpointing = checkpointing
 
         self.upp = np.prod(upsample_rates)
-        self.m_source = SineGenerator(sample_rate)
+        self.m_source = SineGenerator(sr)
 
         # expanded f0 sinegen -> match mel_conv
         # (8, 1, 17280) -> (8, 16, 17280)

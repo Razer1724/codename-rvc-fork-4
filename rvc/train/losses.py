@@ -31,7 +31,7 @@ def feature_loss(fmap_r, fmap_g):
         fmap_r (list of torch.Tensor): List of reference feature maps.
         fmap_g (list of torch.Tensor): List of generated feature maps.
     """
-    return 2 * sum(
+    return sum(
         torch.mean(torch.abs(rl - gl))
         for dr, dg in zip(fmap_r, fmap_g)
         for rl, gl in zip(dr, dg)
@@ -72,6 +72,23 @@ def generator_loss(disc_outputs):
         loss += l
 
     return loss #, gen_losses
+
+
+def envelope_loss(y, y_hat):
+    # stride < kernel_size ensures overlapping coverage so no spikes are missed
+    m = torch.nn.MaxPool1d(kernel_size=5, stride=3)
+
+    # Positive envelope  (peaks )
+    y_env = m(y)
+    y_hat_env = m(y_hat)
+
+    # Negative envelope ( troughs )
+    y_rev_env = m(-y)
+    y_hat_rev_env = m(-y_hat)
+
+    return torch.nn.functional.l1_loss(y_env, y_hat_env) + \
+           torch.nn.functional.l1_loss(y_rev_env, y_hat_rev_env)
+
 
 
 def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
@@ -181,10 +198,10 @@ class HingeAdversarialLoss(nn.Module):
 
 
 class MRSTFTLoss(torch.nn.Module):
-    def __init__(self, sample_rate: int, perceptual_weighting: bool = True):
+    def __init__(self, sample_rate: int, fmin: float = None, fmin_weight: float = 0.1):
         super().__init__()
 
-        resolutions = [32, 64, 128, 256, 512, 1024, 2048]
+        resolutions = [512, 1024, 2048, 4096]
 
         self.losses = torch.nn.ModuleList([
             STFTLoss(
@@ -192,8 +209,9 @@ class MRSTFTLoss(torch.nn.Module):
                 hop_size=fft_size // 4,
                 win_length=fft_size,
                 window="hann_window",
-                perceptual_weighting=perceptual_weighting,
                 sample_rate=sample_rate,
+                fmin=fmin,
+                fmin_weight=fmin_weight,
                 log_eps=1e-5,
             ) for fft_size in resolutions
         ])

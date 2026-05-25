@@ -80,13 +80,12 @@ _SBD_BAND_RANGES = [[0, 6], [0, 11], [0, 16], [0, 64]]
 _SBD_TRANSPOSE   = [False, False, False, True]
 
 
-class CoMBD_SBD_UnivHD_Combined(nn.Module):
+class CoMBD_SBD_Combined(nn.Module):
     """
-    CoMBD + SBD + UnivHD
+    CoMBD + SBD
 
       CoMBD:    collaborative multi-band: evaluates generator intermediate outputs at each resolution against real audio at the matching rate.
       SBD:      sub-band: evaluates the final full-res output in PQMF sub-bands.
-      UnivHD:   harmonic-aware dynamic spectral resolution on full-res output.
 
     forward(y, y_hat_list) -> (y_d_rs, y_d_gs, fmap_rs, fmap_gs)
 
@@ -110,9 +109,8 @@ class CoMBD_SBD_UnivHD_Combined(nn.Module):
 
         self.combd = CoMBD(use_spectral_norm=use_spectral_norm)
         self.sbd = SBD(segment_size_samples=segment_size_samples, use_spectral_norm=use_spectral_norm)
-        self.univhd = UnivHD(sample_rate=sample_rate)
 
-        self.discriminators = nn.ModuleList([self.combd, self.sbd, self.univhd])
+        self.discriminators = nn.ModuleList([self.combd, self.sbd])
 
     def forward(
         self,
@@ -132,72 +130,12 @@ class CoMBD_SBD_UnivHD_Combined(nn.Module):
         # SBD: sub-band on full-res only
         sbd_rs, sbd_gs, sbd_frs, sbd_fgs = self.sbd(y, y_hat_full)
 
-        # UnivHD: harmonic discriminator on full-res only
-        univhd_r, fmap_univhd_r = self.univhd(y)
-        univhd_g, fmap_univhd_g = self.univhd(y_hat_full)
-
         return (
-            combd_rs + sbd_rs + [univhd_r],
-            combd_gs + sbd_gs + [univhd_g],
-            combd_frs + sbd_frs + [fmap_univhd_r],
-            combd_fgs + sbd_fgs + [fmap_univhd_g],
+            combd_rs + sbd_rs,
+            combd_gs + sbd_gs,
+            combd_frs + sbd_frs,
+            combd_fgs + sbd_fgs,
         )
-
-
-
-    # # Debug version of forward. While above we have normal one but just commented out.
-    # def forward(
-        # self,
-        # y: torch.Tensor,
-        # y_hat_list: List[torch.Tensor],
-    # ) -> Tuple[List, List, List, List]:
-        # y_hat_full = y_hat_list[-1]
-
-        # y_lv2 = self._pqmf_lv2.analysis(y)[:, :1, :]
-        # y_lv1 = self._pqmf_lv1.analysis(y)[:, :1, :]
-        # ys = [y_lv2, y_lv1, y]
-
-        # combd_rs, combd_gs, combd_frs, combd_fgs = self.combd(ys, y_hat_list)
-        # sbd_rs,   sbd_gs,   sbd_frs,   sbd_fgs   = self.sbd(y, y_hat_full)
-
-        # univhd_r, fmap_univhd_r = self.univhd(y)
-        # univhd_g, fmap_univhd_g = self.univhd(y_hat_full)
-
-        # # ── FM debug ──────────────────────────────────────────────────────────
-        # if not hasattr(self, '_fm_debug_step'):
-            # self._fm_debug_step = 0
-        # self._fm_debug_step += 1
-
-        # if self._fm_debug_step % 10 == 0:
-            # def _fm(frs, fgs):
-                # loss = 0.0
-                # for dr, dg in zip(frs, fgs):
-                    # for rl, gl in zip(dr, dg):
-                        # loss += F.l1_loss(rl.detach(), gl.detach()).item()
-                # return loss
-
-            # fm_combd  = _fm(combd_frs,        combd_fgs)
-            # fm_sbd    = _fm(sbd_frs,          sbd_fgs)
-            # fm_univhd = _fm([fmap_univhd_r],  [fmap_univhd_g])
-
-            # print(
-                # f"[FM@{self._fm_debug_step}] "
-                # f"combd={fm_combd:.4f}  "
-                # f"sbd={fm_sbd:.4f}  "
-                # f"univhd={fm_univhd:.4f}  "
-                # f"total={fm_combd+fm_sbd+fm_univhd:.4f}"
-            # )
-        # # ─────────────────────────────────────────────────────────────────────
-
-        # return (
-            # combd_rs + sbd_rs + [univhd_r],
-            # combd_gs + sbd_gs + [univhd_g],
-            # combd_frs + sbd_frs + [fmap_univhd_r],
-            # combd_fgs + sbd_fgs + [fmap_univhd_g],
-        # )
-
-
-
 
 # =============================================================================
 # CoMBD - Collaborative Multi-Band Discriminator
@@ -392,163 +330,3 @@ class SBD(nn.Module):
             y_d_gs.append(y_d_g);  fmap_gs.append(fmap_g)
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
-
-
-# =============================================================================
-# UnivHD - Universal Harmonic Discriminator
-# Identical to the version in mpd_msd_mrd_univhd_combined.py
-# =============================================================================
-
-class UnivHD(nn.Module):
-    _N_MDC:   int = 3
-    _HCB_OUT: int = 32
-    _MDC_OUT: int = 32
-
-    def __init__(self, sample_rate, n_fft=None, hop_length=None, win_length=None,
-                 n_harmonics=10, bins_per_octave=24, fmin=32.7,
-                 add_half_harmonic=True, lrelu_slope=0.1):
-        super().__init__()
-
-        n_fft      = n_fft      if n_fft      is not None else _derive_n_fft(sample_rate)
-        hop_length = hop_length if hop_length is not None else _derive_hop(sample_rate)
-        win_length = win_length if win_length is not None else n_fft
-
-        self.sample_rate = sample_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.win_length = win_length
-        self.register_buffer("window", torch.hann_window(win_length))
-
-        self.harmonic_filter = HarmonicFilter(
-            sample_rate=sample_rate, n_fft=n_fft, n_harmonics=n_harmonics,
-            bins_per_octave=bins_per_octave, fmin=fmin, add_half_harmonic=add_half_harmonic,
-        )
-        n_total = self.harmonic_filter.n_total
-
-        self.hcb = HybridConvBlock(in_channels=n_total, out_channels=self._HCB_OUT)
-        self.mdc_blocks = nn.ModuleList([
-            _MDC_UnivHD(
-                in_channels  = self._HCB_OUT if i == 0 else self._MDC_OUT,
-                out_channels = self._MDC_OUT,
-                lrelu_slope  = lrelu_slope,
-            )
-            for i in range(self._N_MDC)
-        ])
-        freq_kernel = _freq_after_mdc(self.harmonic_filter.n_bins)
-        self.final_conv = weight_norm(nn.Conv2d(self._MDC_OUT, 1, kernel_size=(freq_kernel, 1)))
-
-    def _stft_magnitude(self, x):
-        return torch.stft(
-            x.squeeze(1),
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=self.window,
-            center=True,
-            return_complex=True
-        ).abs()
-
-    # def _stft_magnitude(self, x):
-        # x = x - x.mean(dim=-1, keepdim=True)  # DC removal
-        # x = torch.stft(
-            # x.squeeze(1), n_fft=self.n_fft, hop_length=self.hop_length,
-            # win_length=self.win_length, window=self.window,
-            # center=True, return_complex=True,
-        # )
-        # # Parseval normalization
-        # x = x / math.sqrt(self.n_fft)
-        # return x.abs()
-
-    def forward(self, waveform):
-        x = self.harmonic_filter(self._stft_magnitude(waveform))
-        feat_maps = []
-        x = self.hcb(x)
-        for mdc in self.mdc_blocks:
-            x = mdc(x)
-            feat_maps.append(x)
-        return self.final_conv(x).squeeze(1).squeeze(1), feat_maps
-
-
-class _MDC_UnivHD(nn.Module):
-    """MDC used internally by UnivHD (renamed to avoid collision with SBD's MDC)."""
-
-    def __init__(self, in_channels, out_channels=32, kernel_size=5,
-                 dilation_rates=(1, 2, 4), lrelu_slope=0.1):
-        super().__init__()
-        self.lrelu_slope = lrelu_slope
-        k = kernel_size
-        layers, ch = [], in_channels
-        for d in dilation_rates:
-            layers.append(weight_norm(nn.Conv2d(ch, out_channels, (k, k), stride=(1, 1),
-                                                dilation=(d, 1), padding=(d*(k-1)//2, (k-1)//2))))
-            ch = out_channels
-        self.dilated_convs = nn.ModuleList(layers)
-        self.final_conv = weight_norm(nn.Conv2d(out_channels, out_channels, (k, k),
-                                                stride=(2, 1), padding=((k-1)//2, (k-1)//2)))
-
-    def forward(self, x):
-        for conv in self.dilated_convs:
-            x = conv(x)
-        return self.final_conv(F.leaky_relu(x, self.lrelu_slope))
-
-
-class HybridConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels=32, kernel_size=(7, 7)):
-        super().__init__()
-        pad = (kernel_size[0] // 2, kernel_size[1] // 2)
-        self.ds_conv     = weight_norm(nn.Conv2d(in_channels, in_channels, kernel_size, padding=pad, groups=in_channels))
-        self.p_conv      = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1))
-        self.normal_conv = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size, padding=pad))
-
-    def forward(self, x):
-        return self.p_conv(self.ds_conv(x)) + self.normal_conv(x)
-
-
-class HarmonicFilter(nn.Module):
-    def __init__(self, sample_rate, n_fft, n_harmonics=10, bins_per_octave=24,
-                 fmin=32.7, add_half_harmonic=True):
-        super().__init__()
-        self.n_fft  = n_fft
-        self.n_bins = _compute_n_bins(sample_rate, n_harmonics, bins_per_octave, fmin)
-
-        k  = torch.arange(self.n_bins, dtype=torch.float32)
-        fc = fmin * torch.pow(2.0, k / bins_per_octave)
-        self.register_buffer("fc", fc)
-
-        stft_freqs = torch.arange(n_fft // 2 + 1, dtype=torch.float32) * (sample_rate / n_fft)
-        self.register_buffer("stft_freqs", stft_freqs)
-
-        orders = ([0.5] if add_half_harmonic else []) + [float(h) for h in range(1, n_harmonics + 1)]
-        self.n_total = len(orders)
-        self.register_buffer("harmonic_orders", torch.tensor(orders, dtype=torch.float32))
-
-        self.gamma = nn.Parameter(torch.ones(1))
-
-    def forward(self, stft_mag):
-        gamma = self.gamma
-        h_fc  = self.harmonic_orders.unsqueeze(1) * self.fc.unsqueeze(0)
-        h_bw  = (0.1079 * h_fc + 24.7) / gamma.unsqueeze(1)
-        diff  = (self.stft_freqs.unsqueeze(0).unsqueeze(0) - h_fc.unsqueeze(2)).abs()
-        filter_bank = F.relu(1.0 - 2.0 * diff / h_bw.unsqueeze(2))
-        return torch.einsum("hfn,bnt->bhft", filter_bank, stft_mag)
-
-
-# Helper functions for UnivHD
-
-def _next_pow2(x: float) -> int:
-    return 2 ** math.ceil(math.log2(x))
-
-def _derive_n_fft(sample_rate: int) -> int:
-    return _next_pow2(1024 * sample_rate / 24_000)
-
-def _derive_hop(sample_rate: int) -> int:
-    return round(256 * sample_rate / 24_000)
-
-def _compute_n_bins(sample_rate: int, n_harmonics: int, bins_per_octave: int, fmin: float) -> int:
-    fmax_first = sample_rate / (2.0 * n_harmonics)
-    return int(math.floor(bins_per_octave * math.log2(fmax_first / fmin)))
-
-def _freq_after_mdc(f: int, n_mdc: int = 3, k: int = 5, stride: int = 2, pad: int = 2) -> int:
-    for _ in range(n_mdc):
-        f = math.floor((f + 2 * pad - k) / stride) + 1
-    return f
