@@ -2035,27 +2035,6 @@ def inference_tab():
             formant_timbre_batch,
         ],
     )
-    formant_refresh_button.click(
-        fn=refresh_formant,
-        inputs=[],
-        outputs=[formant_preset],
-    )
-    formant_preset.change(
-        fn=update_sliders_formant,
-        inputs=[formant_preset],
-        outputs=[
-            formant_qfrency,
-            formant_timbre,
-        ],
-    )
-    formant_preset_batch.change(
-        fn=update_sliders_formant,
-        inputs=[formant_preset_batch],
-        outputs=[
-            formant_qfrency_batch,
-            formant_timbre_batch,
-        ],
-    )
     post_process.change(
         fn=post_process_visible,
         inputs=[post_process],
