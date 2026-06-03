@@ -12,6 +12,7 @@ import zstandard as zstd
 from core import (
     run_infer_script,
     run_batch_infer_script,
+    run_multi_model_infer_script,
 )
 
 from rvc.lib.utils import format_title
@@ -133,6 +134,7 @@ def change_choices(model):
         {"choices": sorted(audio_paths), "__type__": "update"},
         {"__type__": "update"},
         {"__type__": "update"},
+        {"choices": sorted(names, key=lambda x: extract_model_and_epoch(x)), "__type__": "update"},
     )
 
 
@@ -520,12 +522,59 @@ def inference_tab():
             speakers = get_speakers_id(model_path, sub_model_name)
             speaker_val = speakers[0] if speakers else 0
             return gr.update(choices=speakers, value=speaker_val)
-
             
         def sync_speaker_id(model_path, repurposed_index_value):
             if model_path and model_path.endswith(".uvmp"):
                 return gr.update(value=repurposed_index_value)
             return gr.update()
+
+        def on_multi_model_change(model_paths):
+            if not model_paths:
+                return (
+                    gr.update(visible=False, choices=[], value=[]),
+                    gr.update(choices=[0], value=0)
+                )
+            uvmp_models = []
+            for mp in model_paths:
+                if mp and mp.endswith(".uvmp"):
+                    uvmp_models.extend(get_uvmp_models(mp))
+            
+            uvmp_models = sorted(list(set(uvmp_models)))
+            
+            first_model = model_paths[0]
+            if first_model.endswith(".uvmp"):
+                speakers = get_speakers_id(first_model, uvmp_models[0] if uvmp_models else None)
+            else:
+                speakers = get_speakers_id(first_model)
+                
+            speaker_val = speakers[0] if speakers else 0
+            
+            if uvmp_models:
+                return (
+                    gr.update(visible=True, choices=uvmp_models, value=[uvmp_models[0]] if uvmp_models else []),
+                    gr.update(choices=speakers, value=speaker_val)
+                )
+            else:
+                return (
+                    gr.update(visible=False, choices=[], value=[]),
+                    gr.update(choices=speakers, value=speaker_val)
+                )
+
+        def on_multi_submodel_change(model_paths, sub_model_name):
+            if not model_paths or not sub_model_name:
+                return gr.update(choices=[0], value=0)
+            
+            first_uvmp = next((mp for mp in model_paths if mp.endswith(".uvmp")), None)
+            
+            first_submodel = sub_model_name[0] if isinstance(sub_model_name, list) and len(sub_model_name) > 0 else (sub_model_name if isinstance(sub_model_name, str) else None)
+            
+            if first_uvmp and first_submodel:
+                speakers = get_speakers_id(first_uvmp, first_submodel)
+            else:
+                speakers = [0]
+                
+            speaker_val = speakers[0] if speakers else 0
+            return gr.update(choices=speakers, value=speaker_val)
 
     # Holds: { "audio_name": "<stem of the audio filename>",
     # "f0_json": "<JSON string from extract_f0_for_editor>" }
@@ -1101,8 +1150,45 @@ def inference_tab():
             if not terms_accepted:
                 message = "You must agree to the Terms of Use to proceed."
                 gr.Info(message)
-                return message, None
+                return message
             return run_batch_infer_script(*args)
+
+        def enforce_terms_multi_model(
+            terms_accepted,
+            pitch, filter_radius, index_rate, rms_mix_rate, protect,
+            f0_method, input_audio, output_folder, model_files,
+            split_audio, autotune, autotune_strength,
+            clean_audio, clean_strength, export_format, f0_file,
+            embedder_model, embedder_model_custom,
+            sid, seed, uvmp_submodel=None,
+        ):
+            if not terms_accepted:
+                message = "You must agree to the Terms of Use to proceed."
+                gr.Info(message)
+                return message
+            return run_multi_model_infer_script(
+                pitch=pitch,
+                filter_radius=filter_radius,
+                index_rate=index_rate,
+                volume_envelope=rms_mix_rate,
+                protect=protect,
+                f0_method=f0_method,
+                input_path=input_audio,
+                output_folder=output_folder,
+                model_paths=model_files,
+                split_audio=split_audio,
+                f0_autotune=autotune,
+                f0_autotune_strength=autotune_strength,
+                clean_audio=clean_audio,
+                clean_strength=clean_strength,
+                export_format=export_format,
+                f0_file=f0_file,
+                embedder_model=embedder_model,
+                embedder_model_custom=embedder_model_custom,
+                sid=sid,
+                seed=seed,
+                uvmp_submodel=uvmp_submodel,
+            )
 
         terms_checkbox = gr.Checkbox(
             label="I agree to the terms of use",
@@ -1655,6 +1741,188 @@ def inference_tab():
                 info="The output information will be displayed here.",
             )
 
+    # Multi-model inference tab
+    with gr.Tab("Multi-Model"):
+        with gr.Row():
+            with gr.Column():
+                input_audio_multi = gr.Dropdown(
+                    label="Input Audio",
+                    info="Select the single audio file to convert with every selected model.",
+                    choices=sorted(audio_paths),
+                    value=audio_paths[0] if audio_paths else "",
+                    interactive=True,
+                    allow_custom_value=True,
+                )
+                upload_audio_multi = gr.Audio(
+                    label="Upload Audio", type="filepath", editable=False
+                )
+                model_files_multi = gr.Dropdown(
+                    label="Voice Models",
+                    info="Select one or more voice models (.pth or .uvmp).",
+                    choices=sorted(names, key=lambda x: extract_model_and_epoch(x)),
+                    multiselect=True,
+                    interactive=True,
+                    allow_custom_value=True,
+                )
+                uvmp_submodel_multi = gr.Dropdown(
+                    label="UVMP Sub-Model(s)",
+                    info="Select one or more sub-models from the UVMP bundle.",
+                    choices=[],
+                    value=[],
+                    multiselect=True,
+                    interactive=True,
+                    visible=False
+                )
+                output_folder_multi = gr.Textbox(
+                    label="Output Folder",
+                    info="Folder where per-model output audio files will be saved (named <audio>_<model>.ext).",
+                    placeholder="Enter output path",
+                    value=os.path.join(now_dir, "assets", "audios"),
+                    interactive=True,
+                )
+        with gr.Accordion("Advanced Settings", open=False):
+            with gr.Column():
+                export_format_multi = gr.Radio(
+                    label="Export Format",
+                    info="Choose the audio export format.",
+                    choices=["WAV", "MP3", "FLAC", "OGG", "M4A"],
+                    value="WAV",
+                    interactive=True,
+                )
+                sid_multi = gr.Dropdown(
+                    label="Speaker ID",
+                    info="Select the speaker ID used for inference. \nApplicable only for multi-speaker models.",
+                    choices=[0],
+                    value=0,
+                    interactive=True,
+                )
+                seed_multi = gr.Number(
+                    label="Inference Seed",
+                    info="Specify any seed to be used for inference or leave at '0' for random outputs. ( Classic RVC behavior. ) \n **Ensure you don't leave this field empty.**",
+                    value=0,
+                    interactive=True,
+                )
+                split_audio_multi = gr.Checkbox(
+                    label="Audio splitting",
+                    info="Splits the audio into chunks ( based on **silence** regions! ). \nCan potentially improve the results.",
+                    visible=True,
+                    value=False,
+                    interactive=True,
+                )
+                autotune_multi = gr.Checkbox(
+                    label="Autotuning",
+                    info="Applies the Autotune effect.",
+                    visible=True,
+                    value=False,
+                    interactive=True,
+                )
+                autotune_strength_multi = gr.Slider(
+                    minimum=0, maximum=1,
+                    label="Strength of autotuning",
+                    info="Autotune effect's strength. \nHigher values snap the pitch more tightly to the chromatic grid.",
+                    value=1.0,
+                    visible=False,
+                    interactive=True,
+                )
+                clean_audio_multi = gr.Checkbox(
+                    label="Audio cleanup",
+                    info="Cleans your audio using noise detection algorithms, preferable for talking / speech audios.",
+                    visible=True,
+                    value=False,
+                    interactive=True,
+                )
+                clean_strength_multi = gr.Slider(
+                    minimum=0, maximum=1,
+                    label="Strength of cleaning",
+                    info="Set the strenght of cleaning. If you set it too high, the audio might come out muffly or degraded in quality.",
+                    value=0.7,
+                    visible=False,
+                    interactive=True,
+                )
+                pitch_multi = gr.Slider(
+                    minimum=-24, maximum=24, step=1,
+                    label="Pitch",
+                    info="Set the pitch of the audio, the higher the value, the higher the pitch.",
+                    value=0,
+                    interactive=True,
+                )
+                filter_radius_multi = gr.Slider(
+                    minimum=0, maximum=7, step=1,
+                    label="Filter Radius",
+                    info="If the number is greater than or equal to three, employing median filtering on the collected tone results has the potential to decrease respiration.",
+                    value=3,
+                    interactive=True,
+                )
+                index_rate_multi = gr.Slider(
+                    minimum=0, maximum=1, step=0.01,
+                    label="Search Feature Ratio",
+                    info="Influence exerted by the index file; a higher value corresponds to greater influence. However, opting for lower values can help mitigate artifacts present in the audio.",
+                    value=0.3,
+                    interactive=True,
+                )
+                rms_mix_rate_multi = gr.Slider(
+                    minimum=0, maximum=1, step=0.01,
+                    label="Volume Envelope",
+                    info="Substitute or blend with the volume envelope of the output. The closer the ratio is to 1, the more the output envelope is employed.",
+                    value=1.0,
+                    interactive=True,
+                )
+                protect_multi = gr.Slider(
+                    minimum=0, maximum=0.5, step=0.01,
+                    label="Protect Voiceless Consonants",
+                    info="Safeguard distinct consonants and breathing sounds to prevent electro-acoustic tearing and other artifacts. Pulling the parameter to its maximum value of 0.5 offers comprehensive protection. However, reducing this value might decrease the extent of protection while potentially mitigating the indexing effect.",
+                    value=0.33,
+                    interactive=True,
+                )
+                f0_method_multi = gr.Radio(
+                    label="Pitch extraction algorithm",
+                    info="Pitch extraction algorithm to use for the audio conversion. The default algorithm is rmvpe, which is ***recommended for most cases.***",
+                    choices=["crepe", "crepe-tiny", "rmvpe", "fcpe"],
+                    value="rmvpe",
+                    interactive=True,
+                )
+                f0_file_multi = gr.File(
+                    label="The f0 curve represents the variations in the base frequency of a voice over time, showing how pitch rises and falls.",
+                    visible=True,
+                )
+                embedder_model_multi = gr.Radio(
+                    label="Embedder Model",
+                    info="Model used for learning speaker embedding.",
+                    choices=[
+                        "contentvec",
+                        "spin_v1",
+                        "spin_v2",
+                        "custom",
+                    ],
+                    value="contentvec",
+                    interactive=True,
+                )
+                with gr.Column(visible=False) as embedder_custom_multi:
+                    with gr.Accordion("Custom Embedder", open=True):
+                        with gr.Row():
+                            embedder_model_custom_multi = gr.Dropdown(
+                                label="Select Custom Embedder",
+                                choices=refresh_embedders_folders(),
+                                interactive=True,
+                                allow_custom_value=True,
+                            )
+                            refresh_embedders_button_multi = gr.Button("Refresh embedders")
+
+        terms_checkbox_multi = gr.Checkbox(
+            label="I agree to the terms of use",
+            info="Please ensure compliance with the terms and conditions detailed in [this document](https://github.com/codename0og/codename-rvc-fork-3/blob/main/TERMS_OF_USE.md) before proceeding with your inference.",
+            value=False,
+            interactive=True,
+        )
+        convert_button_multi = gr.Button("Convert with Selected Models")
+
+        with gr.Row():
+            vc_output_multi = gr.Textbox(
+                label="Output Information",
+                info="Per-model results will be shown here.",
+                lines=8,
+            )
+
     def toggle_visible(checkbox):
         return {"visible": checkbox, "__type__": "update"}
 
@@ -1728,6 +1996,17 @@ def inference_tab():
         inputs=[model_file, index_file],
         outputs=[sid],
     )
+    model_files_multi.change(
+        fn=on_multi_model_change,
+        inputs=[model_files_multi],
+        outputs=[uvmp_submodel_multi, sid_multi]
+    )
+    uvmp_submodel_multi.change(
+        fn=on_multi_submodel_change,
+        inputs=[model_files_multi, uvmp_submodel_multi],
+        outputs=[sid_multi]
+    )
+
     autotune.change(
         fn=toggle_visible,
         inputs=[autotune],
@@ -1752,6 +2031,27 @@ def inference_tab():
         inputs=[formant_shifting_batch],
         outputs=[
             formant_row_batch,
+            formant_qfrency_batch,
+            formant_timbre_batch,
+        ],
+    )
+    formant_refresh_button.click(
+        fn=refresh_formant,
+        inputs=[],
+        outputs=[formant_preset],
+    )
+    formant_preset.change(
+        fn=update_sliders_formant,
+        inputs=[formant_preset],
+        outputs=[
+            formant_qfrency,
+            formant_timbre,
+        ],
+    )
+    formant_preset_batch.change(
+        fn=update_sliders_formant,
+        inputs=[formant_preset_batch],
+        outputs=[
             formant_qfrency_batch,
             formant_timbre_batch,
         ],
@@ -1939,7 +2239,7 @@ def inference_tab():
     refresh_button.click(
         fn=change_choices,
         inputs=[model_file],
-        outputs=[model_file, index_file, audio, sid, sid_batch],
+        outputs=[model_file, index_file, audio, sid, sid_batch, model_files_multi],
     )
 
     f0_edit_btn.click(
@@ -2145,6 +2445,7 @@ def inference_tab():
             delay_mix_batch,
             sid_batch,
             seed,
+            uvmp_submodel,
         ],
         outputs=[vc_output3],
     )
@@ -2157,4 +2458,63 @@ def inference_tab():
         fn=disable_stop_convert_button,
         inputs=[],
         outputs=[convert_button_batch, stop_button],
+    )
+    # Multi-model tab event wiring
+    upload_audio_multi.upload(
+        fn=lambda f: save_to_wav2(f)[0],
+        inputs=[upload_audio_multi],
+        outputs=[input_audio_multi],
+    )
+    upload_audio_multi.stop_recording(
+        fn=lambda f: save_to_wav(f)[0],
+        inputs=[upload_audio_multi],
+        outputs=[input_audio_multi],
+    )
+    autotune_multi.change(
+        fn=toggle_visible,
+        inputs=[autotune_multi],
+        outputs=[autotune_strength_multi],
+    )
+    clean_audio_multi.change(
+        fn=toggle_visible,
+        inputs=[clean_audio_multi],
+        outputs=[clean_strength_multi],
+    )
+    embedder_model_multi.change(
+        fn=toggle_visible_embedder_custom,
+        inputs=[embedder_model_multi],
+        outputs=[embedder_custom_multi],
+    )
+    refresh_embedders_button_multi.click(
+        fn=lambda: gr.update(choices=refresh_embedders_folders()),
+        inputs=[],
+        outputs=[embedder_model_custom_multi],
+    )
+    convert_button_multi.click(
+        fn=enforce_terms_multi_model,
+        inputs=[
+            terms_checkbox_multi,
+            pitch_multi,
+            filter_radius_multi,
+            index_rate_multi,
+            rms_mix_rate_multi,
+            protect_multi,
+            f0_method_multi,
+            input_audio_multi,
+            output_folder_multi,
+            model_files_multi,
+            split_audio_multi,
+            autotune_multi,
+            autotune_strength_multi,
+            clean_audio_multi,
+            clean_strength_multi,
+            export_format_multi,
+            f0_file_multi,
+            embedder_model_multi,
+            embedder_model_custom_multi,
+            sid_multi,
+            seed_multi,
+            uvmp_submodel_multi,
+        ],
+        outputs=[vc_output_multi],
     )
