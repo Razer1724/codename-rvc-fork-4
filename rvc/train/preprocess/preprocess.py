@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import random
 from scipy import signal
 from scipy.io import wavfile
 import numpy as np
@@ -197,6 +198,85 @@ class PreProcess:
             slice_idx += 1
             i += stride
 
+    def random_cut(
+        self,
+        audio: np.ndarray,
+        sid: int,
+        idx0: int,
+        overlap_len: float,
+        loading_resampling: str,
+        dataset_format: str,
+    ):
+        """
+        Slice audio into segments with randomly-chosen lengths drawn from a
+        weighted distribution, with a configurable overlap between consecutive
+        slices.  Mirrors the logic of slicer_random.py.
+
+        Length distribution (seconds → probability):
+            1s  →  10 %
+            2s  →  15 %
+            3s  →  40 %   (most common — good for voice training)
+            5s  →  20 %
+            8s  →  10 %
+            10s →   5 %
+        """
+        LENGTHS = {
+            1:  0.10,
+            2:  0.15,
+            3:  0.40,
+            5:  0.20,
+            8:  0.10,
+            10: 0.05,
+        }
+        durations = list(LENGTHS.keys())
+        weights   = list(LENGTHS.values())
+
+        overlap_samples = int(overlap_len * self.sr)
+        position  = 0
+        slice_idx = 0
+        total_samples = len(audio)
+
+        while position < total_samples:
+            duration_sec   = random.choices(durations, weights=weights, k=1)[0]
+            segment_samples = int(duration_sec * self.sr)
+            end_position   = position + segment_samples
+
+            # Drop the trailing tail if it is shorter than the chosen duration
+            if end_position > total_samples:
+                break
+
+            chunk = audio[position:end_position]
+
+            # Save ground-truth slice
+            save_audio(
+                self.gt_wavs_dir,
+                f"{sid}_{idx0}_{slice_idx}",
+                self.sr,
+                dataset_format,
+                chunk,
+            )
+
+            # Resample and save 16 kHz slice
+            if loading_resampling == "librosa":
+                chunk_16k = librosa.resample(
+                    chunk, orig_sr=self.sr, target_sr=SAMPLE_RATE_16K, res_type=RES_TYPE
+                )
+            else:
+                chunk_16k = load_audio_ffmpeg(
+                    chunk, sample_rate=SAMPLE_RATE_16K, source_sr=self.sr,
+                )
+            save_audio(
+                self.wavs16k_dir,
+                f"{sid}_{idx0}_{slice_idx}",
+                SAMPLE_RATE_16K,
+                dataset_format,
+                chunk_16k,
+            )
+
+            step_samples = max(segment_samples - overlap_samples, 1)
+            position  += step_samples
+            slice_idx += 1
+
     def process_audio(
         self,
         path: str,
@@ -232,6 +312,8 @@ class PreProcess:
                 self.process_audio_segment(audio, sid, idx0, 0, loading_resampling, dataset_format)
             elif cut_preprocess == "Simple":
                 self.simple_cut(audio, sid, idx0, chunk_len, overlap_len, loading_resampling, dataset_format)
+            elif cut_preprocess == "Random":
+                self.random_cut(audio, sid, idx0, overlap_len, loading_resampling, dataset_format)
             elif cut_preprocess == "Automatic":
                 idx1 = 0
                 for audio_segment in self.slicer.slice(audio):
