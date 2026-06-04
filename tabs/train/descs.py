@@ -129,6 +129,7 @@ AUDIO_FILE_SLICING_INFO = textwrap.dedent("""\
 **Audio file slicing-method selection:**
 - **Skip:** if the files are already pre-sliced and properly normalized.
 - **Simple:** If your dataset is already silence-truncated or well behaving in terms of spaces / gaps.
+- **Random:** Slices audio into segments with randomly-drawn lengths (weighted: 1s×10%, 2s×15%, 3s×40%, 5s×20%, 8s×10%, 10s×5%). Overlap length is respected. Good for long, continuous recordings where you want natural length variety.
 - **Automatic:** for automatic silence detection and slicing around it.
 **It is advised to go for SmartCutter or Universal approach.**
 **( PS. Automatic is pretty crap. I advise against it unless your set's clean and you can't bother truncating it. )**
