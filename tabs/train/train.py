@@ -704,7 +704,7 @@ def train_tab():
                 cut_preprocess = gr.Radio(
                     label="Audio cutting",
                     info=AUDIO_FILE_SLICING_INFO,
-                    choices=["Skip", "Simple", "Automatic"],
+                    choices=["Skip", "Simple", "Random", "Automatic"],
                     value="Simple",
                     interactive=True,
                     key='cut_preprocess'
@@ -726,7 +726,7 @@ def train_tab():
                     0.3,
                     step=0.1,
                     label="Overlap length (sec)",
-                    info="Length of the overlap between slices for 'Simple' method.",
+                    info="Length of the overlap between slices for 'Simple' and 'Random' methods.",
                     interactive=True,
                     scale=0.57,
                     key='overlap_len'
