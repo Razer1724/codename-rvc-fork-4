@@ -11,6 +11,7 @@ from tabs.utilities.analyzer.analyzer import analyzer_tab
 from tabs.utilities.f0_extractor.f0_extractor import f0_extractor_tab
 from tabs.utilities.uvmp.uvmp import uvmp_tab
 from tabs.utilities.model_processing.model_processing import extract_small_model_tab
+from tabs.utilities.mute_injector.mute_injector import mute_injector_tab
 
 def utilities_tab():
     gr.Markdown(
@@ -30,3 +31,6 @@ def utilities_tab():
 
     with gr.TabItem("Model Processing"):
         extract_small_model_tab()
+
+    with gr.TabItem("Mute Injector"):
+        mute_injector_tab()
