@@ -485,6 +485,85 @@ def run_extract_script(
     return f"Model {model_name} extracted successfully."
 
 
+# Inject Mutes
+def run_inject_mutes(model_name: str, include_mutes: int):
+    """Regenerate filelist.txt for an already-extracted model with a new mute count.
+    
+    This lets you add/change mute entries without re-running full feature extraction.
+    """
+    from rvc.train.extract.preparing_files import generate_filelist
+
+    model_path = os.path.join(logs_path, model_name)
+
+    if not os.path.isdir(model_path):
+        return f"Error: Model folder '{model_name}' not found in logs."
+
+    # Read model_info.json for embedder and vocoder arch
+    model_info_path = os.path.join(model_path, "model_info.json")
+    if not os.path.exists(model_info_path):
+        return (
+            "Error: model_info.json not found in model folder.\n"
+            "Make sure feature extraction has been run first."
+        )
+
+    with open(model_info_path, "r") as f:
+        info = json.load(f)
+
+    embedder_model = info.get("embedder_model", "contentvec")
+    vocoder_arch = info.get("vocoder_architecture", "hifi_refine")
+
+    # Read sample_rate from config.json saved in model folder during extraction
+    config_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_path):
+        return (
+            "Error: config.json not found in model folder.\n"
+            "Make sure feature extraction has been run first."
+        )
+
+    with open(config_path, "r") as f:
+        config_data = json.load(f)
+
+    sample_rate = config_data.get("data", {}).get("sample_rate")
+    if not sample_rate:
+        return "Error: Could not read sample_rate from config.json."
+
+    # Sanity-check that extracted features actually exist
+    extracted_dir = os.path.join(model_path, "extracted")
+    if not os.path.isdir(extracted_dir) or not os.listdir(extracted_dir):
+        return (
+            "Error: No extracted feature files found in the model folder.\n"
+            "Run feature extraction before injecting mutes."
+        )
+
+    try:
+        generate_filelist(model_path, sample_rate, include_mutes, embedder_model, vocoder_arch)
+
+        # Count entries in the new filelist for a helpful confirmation message
+        filelist_path = os.path.join(model_path, "filelist.txt")
+        mute_lines = 0
+        total_lines = 0
+        with open(filelist_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                total_lines += 1
+                if os.sep + "mute" + os.sep in line or "/mute/" in line:
+                    mute_lines += 1
+
+        return (
+            f"filelist.txt regenerated successfully for '{model_name}'.\n\n"
+            f"  Total entries : {total_lines}\n"
+            f"  Mute entries  : {mute_lines}\n"
+            f"  Sample rate   : {sample_rate} Hz\n"
+            f"  Embedder      : {embedder_model}\n"
+            f"  Vocoder       : {vocoder_arch}\n"
+            f"  include_mutes : {include_mutes}"
+        )
+    except Exception as error:
+        return f"Error regenerating filelist: {error}"
+
+
 # Train
 def run_train_script(
     model_name: str,
