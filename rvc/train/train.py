@@ -132,8 +132,8 @@ freeze_gen  = bool(strtobool(sys.argv[40]))  # Freeze generator weights entirely
 
 use_spk_condense = bool(strtobool(sys.argv[41]))  # Speaker condensation: shrink spk_embed_dim to pretrain's capacity when dataset has more speakers
 
-freeze_text_encoder = bool(strtobool(sys.argv[43])) if len(sys.argv) > 43 else False  # Freeze TextEncoder (enc_p) weights
-freeze_emb_pitch    = bool(strtobool(sys.argv[44])) if len(sys.argv) > 44 else False  # Freeze emb_pitch embedding only
+freeze_text_encoder = bool(strtobool(sys.argv[42])) if len(sys.argv) > 42 else False # Freeze TextEncoder (enc_p) weights
+freeze_emb_pitch    = bool(strtobool(sys.argv[43])) if len(sys.argv) > 43 else False # Freeze emb_pitch embedding only
 
 if freeze_disc or freeze_gen or freeze_text_encoder or freeze_emb_pitch:
     parts = []
