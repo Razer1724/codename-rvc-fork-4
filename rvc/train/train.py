@@ -70,7 +70,6 @@ from utils import (
 from losses import (
     discriminator_loss,
     generator_loss,
-    envelope_loss,
     discriminator_tprls_loss,
     generator_tprls_loss,
     HingeAdversarialLoss,
@@ -85,6 +84,7 @@ from mel_processing import (
 )
 from rvc.train.process.extract_model import extract_model
 from rvc.lib.algorithm import commons
+from rvc.lib.algorithm.lora import apply_lora, merge_lora
 from rvc.train.utils import replace_keys_in_dict
 
 # Parse command line arguments start region ===========================
@@ -117,16 +117,18 @@ use_kl_annealing = strtobool(sys.argv[25])
 kl_annealing_cycle_duration = int(sys.argv[26])
 vits2_mode = strtobool(sys.argv[27])
 rolling_loss_steps = int(sys.argv[28])
-use_tstp = bool(strtobool(sys.argv[29]))
 
-grad_clip_scheduling = bool(strtobool(sys.argv[30]))
-grad_clip_steps_duration = int(sys.argv[31])
-grad_clip_value_g_cap, grad_clip_value_d_cap = (int(sys.argv[32]), int(sys.argv[33]))
-grad_clip_value_g_release, grad_clip_value_d_release = (int(sys.argv[34]), int(sys.argv[35]))
+grad_clip_scheduling = bool(strtobool(sys.argv[29]))
+grad_clip_steps_duration = int(sys.argv[30])
+grad_clip_value_g_cap, grad_clip_value_d_cap = (int(sys.argv[31]), int(sys.argv[32]))
+grad_clip_value_g_release, grad_clip_value_d_release = (int(sys.argv[33]), int(sys.argv[34]))
 
-use_custom_lr = strtobool(sys.argv[36])
-custom_lr_g, custom_lr_d = (float(sys.argv[37]), float(sys.argv[38])) if use_custom_lr else (None, None)
+use_custom_lr = strtobool(sys.argv[35])
+custom_lr_g, custom_lr_d = (float(sys.argv[36]), float(sys.argv[37])) if use_custom_lr else (None, None)
 assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
+
+use_lora = bool(strtobool(sys.argv[38]))
+lora_rank = int(sys.argv[39])
 
 # Parse command line arguments end region ===========================
 
@@ -178,6 +180,10 @@ clip_grad_norm_override_value_d = 100
 # EXPERIMENTAL
 use_sid_swap = False
 custom_sid = 1
+
+use_2_sample_kl = False # Needs more testing, for now disabled. You can still set it to True if you wanna test it out.
+free_bits = 0.1
+
 ##################################################################
 
 import logging
@@ -310,6 +316,7 @@ def get_g_model(config, sample_rate, vocoder, use_checkpointing):
         vocoder = vocoder,
         checkpointing = use_checkpointing,
         vits2_mode = vits2_mode,
+        use_2_sample_kl = use_2_sample_kl,
     )
 
 def get_d_model(config, vocoder, use_checkpointing):
@@ -503,6 +510,47 @@ def setup_models_for_training(net_g, net_d, device, device_id, n_gpus):
 
     return net_g, net_d
 
+def _apply_lora_to_generator(net_g, rank):
+    model_g = net_g.module if hasattr(net_g, "module") else net_g
+    apply_lora(model_g, r=lora_rank)
+    for name, param in model_g.named_parameters():
+        if "lora_" in name:
+            pass
+        elif name.endswith(".bias"):
+            pass
+        else:
+            param.requires_grad = False
+    for emb_name in ["emb_g", "enc_p.emb_pitch"]:
+        emb = model_g
+        for part in emb_name.split("."):
+            emb = getattr(emb, part, None)
+            if emb is None:
+                break
+        if emb is not None and hasattr(emb, "weight"):
+            emb.weight.requires_grad = True
+
+    if rank == 0:
+        total_lora = sum(p.numel() for n, p in model_g.named_parameters() if "lora_" in n)
+        total_trainable = sum(p.numel() for p in model_g.parameters() if p.requires_grad)
+        total_all = sum(p.numel() for p in model_g.parameters())
+        # Count wrappers per component
+        wrappers = {"enc_p": 0, "dec": 0, "enc_q": 0, "flow": 0, "other": 0}
+        for n, m in model_g.named_modules():
+            if hasattr(m, "lora_A"):
+                key = n.split(".")[0]
+                if key in wrappers:
+                    wrappers[key] += 1
+                else:
+                    wrappers["other"] += 1
+        print(f"[ ] LoRA r={lora_rank}: {total_lora:,} adapter params ({total_trainable:,} trainable / {total_all:,} total)")
+        for comp in ["enc_p", "dec", "enc_q", "flow"]:
+            if wrappers[comp]:
+                print(f"      {comp}: {wrappers[comp]} layers")
+        if wrappers["other"]:
+            print(f"      other: {wrappers['other']} layers")
+        print(f"      + emb_g.weight, enc_p.emb_pitch.weight (direct)")
+
+
 def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkpointing, sample_rate, optimizer_choice, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader, device, device_id, n_gpus, rank):
     # Init the models
     net_g = get_g_model(config, sample_rate, vocoder, use_checkpointing)
@@ -526,10 +574,15 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
         d_checkpoint_path = get_highest_checkpoint("D_")
         if g_checkpoint_path and d_checkpoint_path:
 
-            # Init the optimizers
-            optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
+            # Apply LoRA before loading checkpoint so LoRA keys exist
+            if use_lora and lora_rank > 0:
+                _apply_lora_to_generator(net_g, rank)
+
             # Move the models to an appropriate device ( And optionally wrap with DDP for multi-gpu )
             net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
+
+            # Init the optimizers
+            optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
 
             # Load the model and optim states
             _, _, _, epoch_str, gradscaler_dict = load_checkpoint(g_checkpoint_path, net_g, optim_g, strict_load)
@@ -551,6 +604,10 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             global_step = int(os.path.basename(g_checkpoint_path).split("_")[-1].split(".")[0])
             epoch_str = (global_step // len(train_loader)) + 1
             print(f"[RESUMING] (G) & (D) at global_step: {global_step} and epoch count: {epoch_str - 1}")
+
+            # Re-create optimizers for LoRA (only track trainable params)
+            if use_lora and lora_rank > 0:
+                optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
         else:
             raise FileNotFoundError("No checkpoints found.")
 
@@ -594,6 +651,10 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
 
             net_d.load_state_dict(state_dict, strict=True)
+
+        # Apply LoRA after loading pretrained weights (wraps convs with loaded weights preserved)
+        if use_lora and lora_rank > 0:
+            _apply_lora_to_generator(net_g, rank)
 
         # Load the models and optionally wrap with DDP
         net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
@@ -827,8 +888,7 @@ def run(
         kl_annealing_cycle_duration,
         spectral_loss,
         adversarial_loss,
-        vits2_mode,
-        use_tstp
+        vits2_mode
     )
 
     # Initial setup
@@ -937,8 +997,6 @@ def run(
     if len(gradscaler_dict) > 0:
         gradscaler.load_state_dict(gradscaler_dict)
         print("[INIT] Loading gradscaler state dict - FP16")
-
-    training_loop.encoders_frozen = False
 
     # Reference sample for live-infer
     reference = get_reference_sample(train_loader, device, config)
@@ -1078,7 +1136,7 @@ def training_loop(
 
     if not from_scratch:
         # Tensors init for averaged losses:
-        if vocoder in ["RingFormer_v1", "RingFormer_v2", "RefineGAN"]:
+        if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             tensor_count = 7
         else:
             tensor_count = 6
@@ -1097,8 +1155,6 @@ def training_loop(
     }
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
         avg_rolling_cache["loss_sd"] = deque(maxlen=rolling_loss_steps)
-    elif vocoder == "RefineGAN":
-        avg_rolling_cache["loss_env"] = deque(maxlen=rolling_loss_steps)
 
     use_amp = config.train.fp16_run and device.type == "cuda"
 
@@ -1143,26 +1199,36 @@ def training_loop(
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
                 model_output = net_g(phone, phone_lengths, pitch, pitchf, spec, spec_lengths, sid)
 
-                # Generator unpacking:
+                # Vocoder-dependent unpacking
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                    y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (mag, _) = (model_output)
+                    y_hat, ids_slice, x_mask, z_mask, vae_parts, (mag, _) = model_output
                 elif vocoder == "APEX-GAN":
                     # y_hat_list = list of [coarse, mid, full] intermediates.
-                    y_hat_list, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q) = (model_output)
+                    y_hat_list, ids_slice, x_mask, z_mask, vae_parts = model_output
                     y_hat = y_hat_list[-1] # final full-res waveform
                 else:
-                    y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q) = (model_output)
+                    y_hat, ids_slice, x_mask, z_mask, vae_parts = model_output
+
+                # latent samples + Gaussian params for ELBO
+                z, z_p, z_p2, m_p, logs_p, m_q, logs_q = vae_parts
 
                 # Slice the original waveform ( y ) to match the generated slice:
                 y = commons.slice_segments(y, ids_slice * config.data.hop_length, config.train.segment_size, dim=3)
+
 
             # RingFormer related
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 reshaped_y = y.view(-1, y.size(-1))
                 reshaped_y_hat = y_hat.view(-1, y_hat.size(-1))
+
                 y_stft = torch.stft(reshaped_y, n_fft=config.model.gen_istft_n_fft, hop_length=config.model.gen_istft_hop_size, win_length=config.model.gen_istft_n_fft, window=hann_window, return_complex=True)
                 y_hat_stft = torch.stft(reshaped_y_hat, n_fft=config.model.gen_istft_n_fft, hop_length=config.model.gen_istft_hop_size, win_length=config.model.gen_istft_n_fft, window=hann_window, return_complex=True)
                 target_magnitude = torch.abs(y_stft)  # shape: [B, F, T]
+
+                loss_magnitude = torch.nn.functional.l1_loss(mag, target_magnitude)
+                loss_phase = phase_loss(y_stft, y_hat_stft)
+                loss_sd = (loss_magnitude + loss_phase) * 0.7
+
 
             # Discriminator forward pass:
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
@@ -1191,12 +1257,12 @@ def training_loop(
                 scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
                 grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
                 gradscaler.step(optim_d) # Optim step
-                #univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
             else:
                 loss_disc.backward() # Loss backward
                 grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
                 optim_d.step() # Optim step
-                #univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
+                univhd_project_gamma(net_d, vocoder, rank, global_step) # univhd safety constraint
 
             # Run discriminator on generated output
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
@@ -1235,10 +1301,6 @@ def training_loop(
                 # Feature Matching loss
                 loss_fm = feature_loss(fmap_r, fmap_g) * 2.0
 
-                # Envelope ( Intensity ) loss
-                if vocoder == "RefineGAN":
-                    loss_env = envelope_loss(y, y_hat)
-
                 # Generator loss
                 if adversarial_loss == "lsgan":
                     loss_adv = generator_loss(y_d_hat_g)
@@ -1248,6 +1310,7 @@ def training_loop(
                 elif adversarial_loss == "hinge":
                     loss_adv = fn_hinge_loss(y_d_hat_g)
 
+
                 # Kl annealing handler
                 if use_kl_annealing:
                     annealing_cycle_steps = len(train_loader) * kl_annealing_cycle_duration
@@ -1255,29 +1318,26 @@ def training_loop(
                 else:
                     kl_beta = 1.0
 
+                # KL ( Kullback–Leibler divergence ) loss
+                loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask, z_p2, free_bits) * config.train.c_kl 
+
+
                 # RingFormer related
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     loss_magnitude = torch.nn.functional.l1_loss(mag, target_magnitude)
                     loss_phase = phase_loss(y_stft, y_hat_stft)
                     loss_sd = (loss_magnitude + loss_phase) * 0.7
 
-                # Total generator loss + kl ( encoders )
-                if not training_loop.encoders_frozen: # For when encoders aren't frozen yet
-                    loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl # KL ( Kullback–Leibler divergence ) loss
-                    if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta + loss_sd
-                    elif vocoder == "RefineGAN":
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_env + loss_kl * kl_beta
-                    else:
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
+
+                # Total generator loss
+                if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta + loss_sd
+                elif vocoder == "RefineGAN":
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
+                elif vocoder == "apex_gan":
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
                 else:
-                    loss_kl = torch.tensor(0.0, device=device) # KL loss dummy for logs
-                    if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_sd
-                    elif vocoder == "RefineGAN":
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_env
-                    else: # apex_gan route and other vocoders that aren't the above ones
-                        loss_gen_total = loss_adv + loss_fm + loss_spectral
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
 
             # Generator backward and update:
             optim_g.zero_grad(set_to_none=True)
@@ -1312,8 +1372,6 @@ def training_loop(
 
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     epoch_loss_tensor[6].add_(loss_sd.detach())
-                elif vocoder == "RefineGAN":
-                    epoch_loss_tensor[6].add_(loss_env.detach())
 
             # Loss accumulation for rolling-avg
             # Grads:
@@ -1336,8 +1394,6 @@ def training_loop(
             avg_rolling_cache["loss_kl"].append(loss_kl.detach())
             if "loss_sd" in avg_rolling_cache:
                 avg_rolling_cache["loss_sd"].append(loss_sd.detach())
-            if "loss_env" in avg_rolling_cache:
-                avg_rolling_cache["loss_env"].append(loss_env.detach())
 
 
             if rank == 0 and global_step % rolling_loss_steps == 0:
@@ -1438,37 +1494,6 @@ def training_loop(
             # Calculate the avg epoch loss:
             avg_epoch_loss = epoch_loss_tensor / num_batches_in_epoch
 
-            # Two-Stage Training protocol ( Heavily Experimental )
-            if use_tstp:
-                KL_FREEZE_THRESHOLD = 0.1 # Freezing threshold   ( If all goes well with this experiment, I will add an UI handler for this. )
-                current_avg_kl = avg_epoch_loss[5].item() # get the loss
-                if not training_loop.encoders_frozen:
-                    if current_avg_kl < KL_FREEZE_THRESHOLD:
-                        if rank == 0:
-                            print(f"\n[TSTP Phase 1]  KL Loss reached current threshold: {KL_FREEZE_THRESHOLD}")
-                            print("[TSTP Phase 1]  Freezing Encoders, Flow and Spk emb. Only Decoder will train now.")
-
-                        # Handle DDP wrapper ( if present )
-                        model_ref = net_g.module if hasattr(net_g, "module") else net_g
-
-                        # Freezing:  TextEncoder (enc_p), PosteriorEncoder (enc_q), Flow and spk embedding
-                        modules_to_freeze = [model_ref.enc_p, model_ref.enc_q, model_ref.flow, model_ref.emb_g]
-
-                        for module in modules_to_freeze:
-                            for param in module.parameters():
-                                param.requires_grad = False # No grads required = frozen.
-                        
-                        training_loop.encoders_frozen = True # Flag as frozen
-
-                        # Accelerating the learning rate decay
-                        for sched in [scheduler_g, scheduler_d]:
-                            if sched is not None and hasattr(sched, 'gamma'):
-                                old_gamma = sched.gamma # Get current gamma
-                                sched.gamma = old_gamma ** 2 # Apply acceleration
-                                if rank == 0:
-                                    print(f"[TSTP Phase 2] Speeding up the learning rate decay by 50%")
-                                    print(f"Gamma change: {old_gamma:.4f} ---> {sched.gamma:.4f}")
-
             # metrics dict
             scalar_dict_avg = {
             "loss_avg/loss_disc": avg_epoch_loss[0].item(),
@@ -1482,8 +1507,6 @@ def training_loop(
             }
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 scalar_dict_avg.update({"loss_avg/loss_sd": avg_epoch_loss[6].item()})
-            elif vocoder == "RefineGAN":
-                scalar_dict_avg.update({"loss_avg/loss_env": avg_epoch_loss[6].item()})
 
             summarize(writer=writer, global_step=global_step, scalars=scalar_dict_avg)
             flush_writer(writer, rank)
@@ -1566,7 +1589,18 @@ def training_loop(
             done = True
 
         if model_add:
-            ckpt = (net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict())
+            # Merge LoRA into conv weights for clean extraction
+            if use_lora and lora_rank > 0:
+                if rank == 0:
+                    print(f"    ██████  Merging LoRA weights for model extraction...")
+                model_g = net_g.module if hasattr(net_g, "module") else net_g
+                # Deep-copy full model so we never modify the live model
+                import copy
+                model_copy = copy.deepcopy(model_g)
+                merge_lora(model_copy, remove_wrappers=True, restore_weight_norm=True)
+                ckpt = model_copy.state_dict()
+            else:
+                ckpt = (net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict())
 
             for m in model_add:
                 if not os.path.exists(m):

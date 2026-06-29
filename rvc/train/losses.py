@@ -91,7 +91,7 @@ def envelope_loss(y, y_hat):
 
 
 
-def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
+def kl_loss_old(z_p, logs_q, m_p, logs_p, z_mask):
     """
     Compute the Kullback-Leibler divergence loss.
 
@@ -107,6 +107,37 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     loss = kl / z_mask.sum()
 
     return loss
+
+
+
+def kl_loss(z_p, logs_q, m_p, logs_p, z_mask, z_p2=None, free_bits=0.0):
+    """
+    Compute the Kullback-Leibler divergence loss.
+    Supports 2-sample estimation when z_p2 is provided.
+    Free bits floor prevents posterior collapse.
+
+    Args:
+        z_p (torch.Tensor): Sampled latent variable transformed by the flow [b, h, t_t].
+        logs_q (torch.Tensor): Log variance of the posterior distribution q [b, h, t_t].
+        m_p (torch.Tensor): Mean of the prior distribution p [b, h, t_t].
+        logs_p (torch.Tensor): Log variance of the prior distribution p [b, h, t_t].
+        z_mask (torch.Tensor): Mask for the latent variables [b, h, t_t].
+        z_p2 (torch.Tensor, optional): Second independent sample through flow (v3 only).
+        free_bits (float): Minimum KL value. 0.1 is default for v3 arch.
+    """
+    def _term(zp):
+        return logs_p - logs_q - 0.5 + 0.5 * ((zp - m_p) ** 2) * torch.exp(-2 * logs_p)
+
+    if z_p2 is not None:
+        kl = (_term(z_p) + _term(z_p2)) * 0.5
+    else:
+        kl = _term(z_p)
+
+    kl = (kl * z_mask).sum()
+    loss = kl / z_mask.sum()
+
+    return loss.clamp(min=free_bits)
+
 
 
 def discriminator_tprls_loss(disc_real_outputs, disc_generated_outputs):

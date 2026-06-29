@@ -24,18 +24,21 @@ def model_blender(name, path1, path2, ratio):
         print(f"[DEBUG] Loaded ckpt1 keys: {list(ckpt1.keys())}")
         print(f"[DEBUG] Loaded ckpt2 keys: {list(ckpt2.keys())}")
 
-        # Check sample rate compatibility
-        if ckpt1["sr"] != ckpt2["sr"]:
+        # Check sample rate compatibility (normalize "48k" -> 48000)
+        def _normalize_sr(v):
+            return int(str(v).replace("k", "000")) if isinstance(v, str) else v
+        sr1 = _normalize_sr(ckpt1["sr"])
+        sr2 = _normalize_sr(ckpt2["sr"])
+        if sr1 != sr2:
             err_msg = "The sample rates of the two models are not the same."
             print(f"[DEBUG] {err_msg}")
-            # Ensure consistent tuple return: error message and None
             return err_msg, None
 
         # Retrieve configuration values
         cfg = ckpt1["config"]
         cfg_f0 = ckpt1["f0"]
         cfg_version = ckpt1["version"]
-        cfg_sr = ckpt1["sr"]
+        cfg_sr = sr1
         vocoder = ckpt1.get("vocoder", "HiFi-GAN")
         print(f"[DEBUG] Config: {cfg}, sr: {cfg_sr}, version: {cfg_version}")
 

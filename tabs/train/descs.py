@@ -200,17 +200,6 @@ but you can experiment for yourself.
 **( Duration in epochs )**
 """)
 
-
-TSTP_INFO = textwrap.dedent("""\
-Enables 'TSTP' ( Might be potentially useful for small datasets. )
-Once encoders loss ( kl ) reaches '0.1':
-
-- Freezes: Encoders, Flow, Spk emb
-- Speeds up lr decay by 50% ( Exponential lr decay only. )
-**(EXPERIMENTAL)**
-""")
-
-
 OPTIMIZER_INFO = textwrap.dedent("""\
 Choose an optimizer used in training:
 ( If unsure, just leave it as it is or try these in this order: AdamW -> AdaBelief -> RAdam. )

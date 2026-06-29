@@ -358,7 +358,6 @@ def print_init_setup(
     spectral_loss,
     adversarial_loss,
     vits2_mode,
-    use_tstp
 ):
     # Warmup init msg:
     if rank == 0:
@@ -426,10 +425,6 @@ def print_init_setup(
         # Kl annealing
         if use_kl_annealing:
             print(f"    ██████  KL loss annealing enabled with cycle duration of: {kl_annealing_cycle_duration} epochs.")
-
-        # Tstp
-        if use_tstp:
-            print(f"    ██████  Two-Stage Training Protocol: Enabled")
 
 def train_loader_safety(train_loader):
     if len(train_loader) < 3:

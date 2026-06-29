@@ -542,7 +542,6 @@ def run_train_script(
     kl_annealing_cycle_duration: int = 3,
     vits2_mode: bool = False,
     rolling_loss_steps: int = 50,
-    use_tstp: bool = False,
     grad_clip_scheduling: bool = False,
     grad_clip_steps_duration: int = 0,
     grad_clip_value_g_cap: int = 0,
@@ -552,6 +551,8 @@ def run_train_script(
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
+    use_lora: bool = False,
+    lora_rank: int = 16,
     
 ):
     global training_process
@@ -602,7 +603,6 @@ def run_train_script(
                 kl_annealing_cycle_duration,
                 vits2_mode,
                 rolling_loss_steps,
-                use_tstp,
                 grad_clip_scheduling,
                 grad_clip_steps_duration,
                 grad_clip_value_g_cap,
@@ -611,7 +611,9 @@ def run_train_script(
                 grad_clip_value_d_release,
                 use_custom_lr,
                 custom_lr_g,
-                custom_lr_d
+                custom_lr_d,
+                use_lora,
+                lora_rank
             ],
         ),
     ]
@@ -2209,13 +2211,6 @@ def parse_arguments():
         default=50,
     )
     train_parser.add_argument(
-        "--use_tstp",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Whether to use Two-Stage Training Protocol ( Freezes encoders, flow, spk emb and speeds up the lr decay. )",
-        default=False,
-    )
-    train_parser.add_argument(
         "--grad_clip_scheduling",
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
@@ -2251,6 +2246,19 @@ def parse_arguments():
         type=int,
         help="Specify what kind of clipping value you want after the scheduling, for D. Set to 0 to leave unconstrained.",
         default=0,
+    )
+    train_parser.add_argument(
+        "--use_lora",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Enables LoRA low-rank adaptation for efficient fine-tuning. Reduces overfitting on small datasets.",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--lora_rank",
+        type=int,
+        help="Rank of the LoRA decomposition. Higher = more capacity but more overfitting risk. Recommended: 8-32.",
+        default=16,
     )
     train_parser.add_argument(
         "--use_custom_lr",
@@ -2597,7 +2605,6 @@ def main():
                 exp_decay_gamma=args.exp_decay_gamma,
                 vits2_mode=args.vits2_mode,
                 rolling_loss_steps=args.rolling_loss_steps,
-                use_tstp=args.use_tstp,
                 grad_clip_scheduling=args.grad_clip_scheduling,
                 grad_clip_steps_duration=args.grad_clip_steps_duration,
                 grad_clip_value_g_cap=args.grad_clip_value_g_cap,
@@ -2607,6 +2614,8 @@ def main():
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,
+                use_lora=args.use_lora,
+                lora_rank=args.lora_rank,
             )
         elif args.mode == "index":
             run_index_script(

@@ -5,10 +5,18 @@ import random
 
 from rvc.lib.algorithm import generators
 from rvc.lib.algorithm.commons import slice_segments, rand_slice_segments
-from rvc.lib.algorithm.normalizing_flows import ResidualCouplingBlock, ResidualCouplingTransformersBlock
-from rvc.lib.algorithm.encoders import PosteriorEncoder # Posterior encoder, shared between Vits1 and Vits2
-from rvc.lib.algorithm.encoders_vits2 import TextEncoder_VITS2
-from rvc.lib.algorithm.encoders import TextEncoder as TextEncoder_VITS1
+
+# Normalizing Flows
+from rvc.lib.algorithm.normalizing_flow_rvc import ResidualCouplingBlock
+from rvc.lib.algorithm.normalizing_flow_vits2 import ResidualCouplingTransformersBlock
+
+# Text Encoders
+from rvc.lib.algorithm.text_encoder_rvc import TextEncoderRVC
+from rvc.lib.algorithm.text_encoder_vits2 import TextEncoderVITS2
+
+# Posterior Encoders
+from rvc.lib.algorithm.posterior_encoder import PosteriorEncoder
+
 
 debug_shapes = False
 
@@ -39,6 +47,7 @@ class Synthesizer(torch.nn.Module):
         checkpointing: bool = False,
         # Other
         vits2_mode: bool = False,
+        use_2_sample_kl: bool = False,
         # RingFormer
         gen_istft_n_fft: int = 120,
         gen_istft_hop_size: int = 30,
@@ -50,6 +59,7 @@ class Synthesizer(torch.nn.Module):
         self.vocoder = vocoder
         self.vits2_mode = vits2_mode
         self.sr = sr
+        self.use_2_sample_kl = use_2_sample_kl
 
 
         # ------   [ TextEncoder ] Maps extracted features to latent space (p)   ----------------------------------------------------
@@ -64,11 +74,12 @@ class Synthesizer(torch.nn.Module):
             "embedding_dim": text_enc_hidden_dim,
             "f0": use_f0,
         }
+
         if vits2_mode:
             enc_p_kwargs["gin_channels"] = gin_channels # Vits2 TextEncoder needs gin channels since it's speaker-conditioned
-            TextEncoderClass = TextEncoder_VITS2
+            TextEncoderClass = TextEncoderVITS2
         else:
-            TextEncoderClass = TextEncoder_VITS1
+            TextEncoderClass = TextEncoderRVC
 
         self.enc_p = TextEncoderClass(**enc_p_kwargs)
 
@@ -113,26 +124,27 @@ class Synthesizer(torch.nn.Module):
 
         # ------   [ Posterior Encoder ] Extracts latents (z) from target audio (training only)   -----------------------------------
         self.enc_q = PosteriorEncoder(
-            spec_channels,
-            inter_channels,
-            hidden_channels,
-            5,
-            1,
-            16,
+            in_channels=spec_channels,
+            out_channels=inter_channels,
+            hidden_channels=hidden_channels,
             gin_channels=gin_channels,
+            kernel_size=5,
+            dilation_rate=1,
+            n_layers=16,
         )
 
 
         # ------   [ Flow ] Reversible transformation between content priors (p) and speaker-conditioned latents (z)   --------------
-        FlowClass = ResidualCouplingTransformersBlock if vits2_mode else ResidualCouplingBlock
-        self.flow = FlowClass(
-            inter_channels,
-            hidden_channels,
-            5,
-            1,
-            3,
+        self.flow = ResidualCouplingBlock(
+            channels=inter_channels,
+            hidden_channels=hidden_channels,
+            n_flows=4,
+            n_layers=3,
+            kernel_size=5,
+            dilation_rate=1,
             gin_channels=gin_channels,
         )
+
 
         # ------   [ Speaker Embedding ] Maps identity to global conditioning (g)   -------------------------------------------------
         self.emb_g = torch.nn.Embedding(spk_embed_dim, gin_channels)
@@ -167,8 +179,8 @@ class Synthesizer(torch.nn.Module):
         Forward pass of the model.
 
         Args:
-            phone (torch.Tensor): Phoneme sequence.
-            phone_lengths (torch.Tensor): Lengths of the phoneme sequences.
+            phone (torch.Tensor): Contentvec features.
+            phone_lengths (torch.Tensor): Lengths of the contentvec features.
             pitch (torch.Tensor, optional): Pitch sequence.
             pitchf (torch.Tensor, optional): Fine-grained pitch sequence.
             spec (torch.Tensor, optional): Target spectrogram.
@@ -183,44 +195,43 @@ class Synthesizer(torch.nn.Module):
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
         if spec is not None:
+            # Posterior
             z, m_q, logs_q, spec_mask = self.enc_q(spec, spec_lengths, g=g)
+            # Flow
             z_p = self.flow(z, spec_mask, g=g)
 
+            # 2nd sample for KL variance reduction
+            z_p2 = None
+            if self.use_2_sample_kl:
+                z2 = (m_q + torch.randn_like(m_q) * torch.exp(logs_q)) * spec_mask
+                z_p2 = self.flow(z2, spec_mask, g=g)
+
+            # Slicing operations
+            z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
+            if self.use_f0:
+                pitchf_slice = slice_segments(pitchf, ids_slice, self.segment_size, 2)
+
+
+            # Decoder forward
             if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                o, spec, phase = self.dec(z_slice, pitchf, g=g)
-
-                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (spec, phase)
-
+                o, spec, phase = self.dec(z_slice, pitchf_slice, g=g)
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, z_p2, m_p, logs_p, m_q, logs_q), (spec, phase)
             elif self.vocoder == "APEX-GAN":
-                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                o = self.dec(z_slice, pitchf, g=g, return_intermediates=True)
-
-                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
-
+                o = self.dec(z_slice, pitchf_slice, g=g)
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, z_p2, m_p, logs_p, m_q, logs_q)
             elif self.vocoder == "RefineGAN":
-                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-                pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                o = self.dec(z_slice, pitchf, g=g)
-
-                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
-
-            else: # For HiFi-Gan training
-                z_slice, ids_slice = rand_slice_segments(z, spec_lengths, self.segment_size)
-
+                o = self.dec(z_slice, pitchf_slice, g=g)
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, z_p2, m_p, logs_p, m_q, logs_q)
+            else: # For HiFi-Gan
                 if self.use_f0:
-                    pitchf = slice_segments(pitchf, ids_slice, self.segment_size, 2)
-                    o = self.dec(z_slice, pitchf, g=g)
+                    o = self.dec(z_slice, pitchf_slice, g=g)
                 else:
                     o = self.dec(z_slice, g=g)
 
-                return o, ids_slice, x_mask, spec_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+                return o, ids_slice, x_mask, spec_mask, (z, z_p, z_p2, m_p, logs_p, m_q, logs_q)
         else:
             print(" NONE SPEC ")
-            return None, None, x_mask, None, (None, None, m_p, logs_p, None, None)
-
+            return None, None, x_mask, None, (None, None, None, m_p, logs_p, None, None)
 
     @torch.jit.export
     def infer(
@@ -236,8 +247,8 @@ class Synthesizer(torch.nn.Module):
         Inference of the model.
 
         Args:
-            phone (torch.Tensor): Phoneme sequence.
-            phone_lengths (torch.Tensor): Lengths of the phoneme sequences.
+            phone (torch.Tensor): Contentvec features.
+            phone_lengths (torch.Tensor): Lengths of the contentvec features.
             pitch (torch.Tensor, optional): Pitch sequence.
             nsff0 (torch.Tensor, optional): Fine-grained pitch sequence.
             sid (torch.Tensor): Speaker embedding.
@@ -252,23 +263,23 @@ class Synthesizer(torch.nn.Module):
 
         g = self.emb_g(sid).unsqueeze(-1)
 
+        # TextEncoder
         if self.vits2_mode:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths, g=g)
         else:
             m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
+        # Flow
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
         z = self.flow(z_p, x_mask, g=g, reverse=True)
 
+        # Decoder
         if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
             o, _, _ = self.dec(z * x_mask, nsff0, g)
-
         elif self.vocoder == "APEX-GAN":
-            o = (self.dec(z * x_mask, nsff0, g, return_intermediates=False) if self.use_f0 else self.dec(z * x_mask, g=g, return_intermediates=False))
-
+            o = (self.dec(z * x_mask, nsff0, g) if self.use_f0 else self.dec(z * x_mask, g=g))
         elif self.vocoder == "RefineGAN":
             o = (self.dec(z * x_mask, nsff0, g) if self.use_f0 else self.dec(z * x_mask, g=g))
-
         else: # HiFi-GAN
             o = (self.dec(z * x_mask, nsff0, g) if self.use_f0 else self.dec(z * x_mask, g=g))
 

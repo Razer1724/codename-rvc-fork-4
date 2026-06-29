@@ -823,13 +823,6 @@ def train_tab():
                         visible="hidden",
                         key='kl_annealing_cycle_duration'
                     )
-                    use_tstp = gr.Checkbox(
-                        label="Two-Stage Training Protocol",
-                        info=TSTP_INFO,
-                        value=False,
-                        interactive=True,
-                        key='use_tstp'
-                    )
             with gr.Column():
                 custom_pretrained = gr.Checkbox(
                     label="Custom Pretrained",
@@ -931,6 +924,23 @@ def train_tab():
                             key='custom_lr_d'
                         )
 
+                use_lora = gr.Checkbox(
+                    label="LoRA fine-tuning",
+                    info="Low-Rank Adaptation: trains small adapters instead of full weights. Reduces overfitting on small/medium datasets and preserves pretrained model's generalization.",
+                    value=False,
+                    interactive=True,
+                    key='use_lora'
+                )
+                with gr.Column(visible=False) as lora_settings:
+                    with gr.Accordion("LoRA settings"):
+                        lora_rank = gr.Slider(
+                            1, 128, 16, step=1,
+                            label="LoRA rank",
+                            info="Higher rank = more capacity, but also more overfitting risk. Start off with: 16. \n If you want to experiment / find a match for your case: 4, 8, 16, 32, 64, 128",
+                            interactive=True,
+                            key='lora_rank'
+                        )
+
                 index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
@@ -998,7 +1008,6 @@ def train_tab():
                     kl_annealing_cycle_duration,
                     vits2_mode,
                     rolling_loss_steps,
-                    use_tstp,
                     grad_clip_scheduling,
                     grad_clip_steps_duration,
                     grad_clip_value_g_cap,
@@ -1008,6 +1017,8 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
+                    use_lora,
+                    lora_rank,
                 ],
                 outputs=[train_output_info],
             )
@@ -1213,7 +1224,7 @@ def train_tab():
                 d_pretrained_path, multiple_gpu, training_gpu, use_warmup,
                 warmup_duration, use_custom_lr, custom_lr_g,
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
-                rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
+                rolling_loss_steps, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
                 grad_clip_value_d_release, index_algorithm
             ])
@@ -1343,6 +1354,11 @@ def train_tab():
                 fn=toggle_visible,
                 inputs=[use_custom_lr],
                 outputs=[custom_lr_settings],
+            )
+            use_lora.change(
+                fn=toggle_visible,
+                inputs=[use_lora],
+                outputs=[lora_settings],
             )
             use_kl_annealing.change(
                 fn=lambda v: {"visible": True, "__type__": "update"} if v else {"visible": "hidden", "__type__": "update"},
