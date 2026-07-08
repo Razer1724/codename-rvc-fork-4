@@ -44,7 +44,6 @@ SAMPLE_RATE_16K = 16000
 RES_TYPE = "soxr_vhq"
 FLAC_COMPRESSION_LEVEL = 5 / 8 # FLAC level 5, libsndfile uses 0.0 - 1.0 range for compression level
 
-
 def secs_to_samples(secs, sr):
     """Return an *exact* integer number of samples for `secs` seconds at `sr` Hz.
        Raises if the result is not an integer (prevents float drift)."""
@@ -267,15 +266,16 @@ def _process_audio_worker(args):
         normalization_mode,
     )
 
-def _apply_post_norm(audio: np.ndarray, sr: int, mode: str) -> np.ndarray:
+def _apply_post_norm(audio: np.ndarray, sr: int, mode: str, rms_norm_db: float):
     """
     Dispatch to the correct norm function.
     All three operate on float32/float64 arrays and return float32.
+    Returns (audio, stats) where stats is None or a dict of limiting info.
     """
     if mode == "post_rms":
         # RMS normalization - Consistent loudness targeting -18 dBFS RMS
         eps = 1e-9
-        target_rms = 10 ** (-18.0 / 20)
+        target_rms = 10 ** (rms_norm_db / 20)
         headroom = 10 ** (-0.5  / 20)
         silence_thresh = 10 ** (-40.0 / 20)
         mask = np.abs(audio) > silence_thresh
@@ -287,40 +287,53 @@ def _apply_post_norm(audio: np.ndarray, sr: int, mode: str) -> np.ndarray:
         audio2 = audio * gain
         peak = np.abs(audio2).max()
         if peak > headroom:
+            gain_db = 20 * np.log10(gain)
+            peak_db = 20 * np.log10(peak)
+            crest_db = peak_db - rms_norm_db
+            safe_max_db = int(np.floor(-0.5 - crest_db))
             audio2 = audio2 / peak * headroom
-        return audio2.astype(np.float32)
+            return audio2.astype(np.float32), dict(gain_db=gain_db, peak_db=peak_db, crest_db=crest_db, safe_max_db=safe_max_db)
+        return audio2.astype(np.float32), None
 
     elif mode == "post_peak_rvc":
         # Classic RVC normalization - soft peak blend (MAX_AMPLITUDE * ALPHA)
         a_max = np.abs(audio).max()
         if a_max <= 0:
-            return audio.astype(np.float32)
-        return ((audio / a_max * (MAX_AMPLITUDE * ALPHA)) + (1 - ALPHA) * audio).astype(np.float32)
+            return audio.astype(np.float32), None
+        return ((audio / a_max * (MAX_AMPLITUDE * ALPHA)) + (1 - ALPHA) * audio).astype(np.float32), None
 
     elif mode == "post_peak":
         # Simple peak normalization to 0.95
         peak = np.max(np.abs(audio))
         if peak > 0:
-            return (audio / peak * 0.95).astype(np.float32)
-        return audio.astype(np.float32)
+            return (audio / peak * 0.95).astype(np.float32), None
+        return audio.astype(np.float32), None
 
-    return audio.astype(np.float32)
+    return audio.astype(np.float32), None
 
 
 def _process_and_save_worker(args):
-    """Shared post-norm worker"""
-    file_name, gt_wavs_dir, wavs16k_dir, mode = args
+    """Shared post-norm worker. Returns list of limiting stats or None."""
+    file_name, gt_wavs_dir, wavs16k_dir, mode, rms_norm_db = args
+    stats = []
     try:
         stem, ext = file_name.split(".")[0], file_name.split(".")[1]
 
         gt_audio, gt_sr = sf.read(os.path.join(gt_wavs_dir, file_name))
-        save_audio(gt_wavs_dir, stem, gt_sr, ext, _apply_post_norm(gt_audio, gt_sr, mode))
+        gt_result, gt_s = _apply_post_norm(gt_audio, gt_sr, mode, rms_norm_db)
+        save_audio(gt_wavs_dir, stem, gt_sr, ext, gt_result)
+        if gt_s:
+            stats.append(gt_s)
 
         k16_audio, k16_sr = sf.read(os.path.join(wavs16k_dir, file_name))
-        save_audio(wavs16k_dir, stem, k16_sr, ext, _apply_post_norm(k16_audio, k16_sr, mode))
+        k16_result, k16_s = _apply_post_norm(k16_audio, k16_sr, mode, rms_norm_db)
+        save_audio(wavs16k_dir, stem, k16_sr, ext, k16_result)
+        if k16_s:
+            stats.append(k16_s)
     except Exception as e:
         logger.error(f"Error normalizing {file_name} ({mode}): {e}")
         raise e
+    return stats if stats else None
 
 def format_duration(seconds):
     hours = int(seconds // 3600)
@@ -416,7 +429,8 @@ def preprocess_training_set(
     normalization_mode: str,
     loading_resampling: str,
     use_smart_cutter: bool,
-    dataset_format: str
+    dataset_format: str,
+    rms_norm_db: float = -18.0
 ):
     start_time = time.time()
     print(f"Normalization mode: {normalization_mode}")
@@ -554,14 +568,29 @@ def preprocess_training_set(
         wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
 
         audio_files = sorted(f for f in os.listdir(gt_wavs_dir) if f.endswith((".wav", ".flac")))
-        arg_list = [(f, gt_wavs_dir, wavs16k_dir, normalization_mode) for f in audio_files]
+        arg_list = [(f, gt_wavs_dir, wavs16k_dir, normalization_mode, rms_norm_db) for f in audio_files]
 
         with multiprocessing.Pool(processes=num_processes) as pool:
-            list(tqdm(
+            all_stats = list(tqdm(
                 pool.imap_unordered(_process_and_save_worker, arg_list),
                 total=len(audio_files),
                 desc=POST_NORM_MODES[normalization_mode]
             ))
+
+        if normalization_mode == "post_rms":
+            flat = [s for r in all_stats if r for s in r]
+            if flat:
+                gain_dbs = np.array([s["gain_db"] for s in flat])
+                peak_dbs = np.array([s["peak_db"] for s in flat])
+                crests = np.array([s["crest_db"] for s in flat])
+                safe_maxs = [s["safe_max_db"] for s in flat]
+                worst_safe = min(safe_maxs)
+                logger.warning(
+                    f"[post_rms] Target {rms_norm_db:.0f} dBFS: {len(flat)} slices limited. "
+                    f"Avg gain {gain_dbs.mean():+.1f} dB, avg peak {peak_dbs.mean():.1f} dBFS, "
+                    f"avg crest {crests.mean():.0f} dB. "
+                    f"Use RMS target ≤ {worst_safe} dBFS to avoid limiting on all slices."
+                )
 
     elapsed_time = time.time() - start_time
     logger.info(f"Preprocessing completed in {elapsed_time:.2f} seconds "
@@ -569,7 +598,7 @@ def preprocess_training_set(
 
 if __name__ == "__main__":
     if len(sys.argv) < 15:
-        print("Usage: python preprocess.py <experiment_directory> <input_root> <sample_rate> <num_processes or 'none'> <cut_preprocess> <process_effects> <noise_reduction> <reduction_strength> <chunk_len> <overlap_len> <normalization_mode> <loading_resampling> <use_smart_cutter> <dataset_format>")
+        print("Usage: python preprocess.py <experiment_directory> <input_root> <sample_rate> <num_processes or 'none'> <cut_preprocess> <process_effects> <noise_reduction> <reduction_strength> <chunk_len> <overlap_len> <normalization_mode> <loading_resampling> <use_smart_cutter> <dataset_format> [rms_norm_db]")
         sys.exit(1)
     experiment_directory = str(sys.argv[1])
     input_root = str(sys.argv[2])
@@ -591,6 +620,7 @@ if __name__ == "__main__":
     loading_resampling = str(sys.argv[12])
     use_smart_cutter = bool(strtobool(sys.argv[13]))
     dataset_format = str(sys.argv[14])
+    rms_norm_db = float(sys.argv[15]) if len(sys.argv) >= 16 else -18.0
 
     preprocess_training_set(
         input_root,
@@ -606,5 +636,6 @@ if __name__ == "__main__":
         normalization_mode,
         loading_resampling,
         use_smart_cutter,
-        dataset_format
+        dataset_format,
+        rms_norm_db,
     )

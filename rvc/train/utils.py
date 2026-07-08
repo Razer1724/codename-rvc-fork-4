@@ -240,24 +240,6 @@ def load_config_from_json(config_save_path):
         )
         sys.exit(1)
 
-
-def mel_spec_similarity(y_hat_mel, y_mel):
-    device = y_hat_mel.device
-    y_mel = y_mel.to(device)
-
-    if y_hat_mel.shape != y_mel.shape:
-        trimmed_shape = tuple(min(dim_a, dim_b) for dim_a, dim_b in zip(y_hat_mel.shape, y_mel.shape))
-        y_hat_mel = y_hat_mel[..., :trimmed_shape[-1]]
-        y_mel = y_mel[..., :trimmed_shape[-1]]
-    
-    loss_mel = F.l1_loss(y_hat_mel, y_mel)
-
-    mel_spec_similarity = 100.0 - (loss_mel * 100.0)
-    mel_spec_similarity = mel_spec_similarity.clamp(0.0, 100.0)
-
-    return mel_spec_similarity
-
-
 def flush_writer(writer, rank):
     if rank == 0 and writer is not None:
         writer.flush()
@@ -350,14 +332,15 @@ def print_init_setup(
     rank,
     use_warmup,
     config,
-    optimizer_choice,
-    lr_scheduler,
-    exp_decay_gamma,
+    optimizer_choice_g,
+    optimizer_choice_d,
+    lr_scheduler_g,
+    exp_decay_gamma_g,
+    lr_scheduler_d,
+    exp_decay_gamma_d,
     use_kl_annealing,
     kl_annealing_cycle_duration,
     spectral_loss,
-    adversarial_loss,
-    vits2_mode,
 ):
     # Warmup init msg:
     if rank == 0:
@@ -385,8 +368,8 @@ def print_init_setup(
             print("    ██████  cudnn.deterministic: False")
 
         # Optimizer check:
-        print(f"    ██████  Optimizer used: {optimizer_choice}")
-
+        print(f"    ██████  Optimizer (G): {optimizer_choice_g}")
+        print(f"    ██████  Optimizer (D): {optimizer_choice_d}")
 
         # Spectral loss check:
         if spectral_loss == "L1 Mel Loss":
@@ -398,25 +381,23 @@ def print_init_setup(
         elif spectral_loss == "Hybrid MS":
             print("    ██████  Spectral loss: Hybrid MS ( Multi-Scale Mel + Multi-Resolution STFT loss )")
 
-        # Adversarial loss check:
-        if adversarial_loss == "tprls":
-            print("    ██████  Adversarial loss: TPRLS")
-        elif adversarial_loss == "hinge":
-            print("    ██████  Adversarial loss: HINGE")
-        elif adversarial_loss == "lsgan":
-            print("    ██████  Adversarial loss: LSGAN")
 
-        # Vits maode checkup:
-        if vits2_mode:
-            print("    ██████  Vits mode: vits-based + few vits2 tweaks (Custom)")
+        # Learning rate scheduler check:
+        if lr_scheduler_g != "none":
+            if lr_scheduler_g != "cosine annealing":
+                print(f"    ██████  LR scheduler (G): {lr_scheduler_g}, gamma: {exp_decay_gamma_g}")
+            else:
+                print(f"    ██████  LR scheduler (G): cosine annealing")
         else:
-            print("    ██████  Vits mode: vits-based (Default RVC)")
+            print(f"    ██████  LR scheduler (G): Disabled")
 
-        # LR scheduler check:
-        if lr_scheduler == "exp decay":
-            print(f"    ██████  lr scheduler: exponential lr decay with gamma of: {exp_decay_gamma}")
-        elif lr_scheduler == "cosine annealing":
-            print(f"    ██████  lr scheduler: cosine annealing")
+        if lr_scheduler_d != "none":
+            if lr_scheduler_d != "cosine annealing":
+                print(f"    ██████  LR scheduler (D): {lr_scheduler_d}, gamma: {exp_decay_gamma_d}")
+            else:
+                print(f"    ██████  LR scheduler (D): cosine annealing")
+        else:
+            print(f"    ██████  LR scheduler (D): Disabled")
 
         # Warmup
         if use_warmup:
@@ -429,7 +410,7 @@ def print_init_setup(
 def train_loader_safety(train_loader):
     if len(train_loader) < 3:
         print("Not enough data present in the training set. Perhaps you didn't slice the audio files? ( Preprocessing step )")
-        os._exit(2333333)
+        os._exit(1)
 
 
 def verify_spk_dim(
@@ -484,7 +465,6 @@ def early_stopper(
     save_weight_models,
     model_name,
     vocoder,
-    vits2_mode,
     n_gpus
 ):
     if stopper is not None and stopper.stop_triggered:
@@ -518,7 +498,6 @@ def early_stopper(
                     hps=config, 
                     vocoder=vocoder, 
                     architecture=architecture, 
-                    vits2_mode=vits2_mode
                 )
                 print(f"[TRAINING] All finished .. You can ignore anything past this msg.")
         if n_gpus > 1:

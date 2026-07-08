@@ -1,10 +1,8 @@
-from typing import List, Optional, Tuple, Union
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch import Tensor
-from rvc.train.stft_loss_tweaked import STFTLoss
+from typing import Tuple
 
 def phase_loss(x_fft: torch.Tensor, g_fft: torch.Tensor, reduction: str = 'mean') -> torch.Tensor:
     x_norm = x_fft / (x_fft.abs() + 1e-9)
@@ -42,22 +40,21 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
     """
     Compute the discriminator loss for real and generated outputs.
 
-    Args:
-        disc_real_outputs (list of torch.Tensor): List of discriminator outputs for real samples.
-        disc_generated_outputs (list of torch.Tensor): List of discriminator outputs for generated samples.
+    Returns:
+        Tuple of (total_loss, real_loss_sum, fake_loss_sum) aggregated across
+        all sub-discriminator heads (MPD periods, MSD scales, MRD resolutions).
     """
     loss = 0
-    # r_losses = []
-    # g_losses = []
+    loss_real = 0
+    loss_fake = 0
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         r_loss = torch.mean((1 - dr.float()) ** 2)
         g_loss = torch.mean(dg.float() ** 2)
-
-        # r_losses.append(r_loss.item())
-        # g_losses.append(g_loss.item())
         loss += r_loss + g_loss
+        loss_real += r_loss
+        loss_fake += g_loss
 
-    return loss # , r_losses, g_losses
+    return loss, loss_real, loss_fake
 
 
 def generator_loss(disc_outputs):
@@ -139,113 +136,76 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask, z_p2=None, free_bits=0.0):
     return loss.clamp(min=free_bits)
 
 
-
-def discriminator_tprls_loss(disc_real_outputs, disc_generated_outputs):
+class MultiScaleSTFTLoss(nn.Module):
     """
-    TPRLS Discriminator Loss
+    Multi-scale STFT loss for audio reconstruction.
+
+    Computes spectral convergence and log magnitude loss
+    at multiple STFT resolutions.
     """
-    loss = 0
-    tau = 0.04
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        dr = dr.float()
-        dg = dg.float()
-        m_DG = torch.median(dr - dg)
-        diff = (dr - dg) - m_DG
-        mask = dr < (dg + m_DG)
-        masked = diff[mask]
-        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dr.device)
-        loss += tau - F.relu(tau - L_rel)
-    return loss
 
+    def __init__(
+        self,
+        fft_sizes: Tuple[int, ...] = (512, 1024, 2048),
+        hop_sizes: Tuple[int, ...] = (128, 256, 512),
+        win_sizes: Tuple[int, ...] = (512, 1024, 2048),
+    ):
+        super().__init__()
+        self.fft_sizes = fft_sizes
+        self.hop_sizes = hop_sizes
+        self.win_sizes = win_sizes
 
-def generator_tprls_loss(disc_real_outputs, disc_generated_outputs):
-    """
-    TPRLS Generator Loss
-    """
-    loss = 0
-    tau = 0.04
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        dr = dr.float()
-        dg = dg.float()
-        diff = dg - dr
-        m_DG = torch.median(diff)
-        rel = diff - m_DG
-        mask = diff < m_DG
-        masked = rel[mask]
-        L_rel = torch.mean(masked ** 2) if masked.numel() > 0 else torch.tensor(0.0, device=dg.device)
-        loss += tau - F.relu(tau - L_rel)
-    return loss
+    def _stft(self, x: torch.Tensor, fft_size: int, hop_size: int, win_size: int) -> torch.Tensor:
+        """Compute STFT magnitude."""
 
+        # [B, C, T] -> [B, T]
+        x = x.squeeze(1) 
 
-class HingeAdversarialLoss(nn.Module):
-    """Module for calculating adversarial loss in GANs."""
+        # Pad to avoid edge effects
+        x = F.pad(x, (win_size // 2, win_size // 2), mode='reflect')
 
-    def __init__(self, clamped_generator: bool = True) -> None:
+        window = torch.hann_window(win_size, device=x.device, dtype=x.dtype)
+        stft = torch.stft(
+            x, fft_size, hop_size, win_size, window,
+            return_complex=True, center=False
+        )
+        return stft.abs()
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
-        Hinge adversarial loss.
+        Compute multi-scale STFT loss.
+
+        Per-sample spectral convergence with silence masking —
+        mute samples (||X||_F ≈ 0) are excluded since SC is undefined for zero-energy.
 
         Args:
-            clamped_generator (bool): If True, uses clamped generator loss max{0, 1 - D(fake)} If False, uses unclamped -D(fake).mean().
+            pred: (B, T) predicted audio
+            target: (B, T) target audio
         """
-        super().__init__()
+        sc_loss = 0.0
+        mag_loss = 0.0
 
-        self.adv_criterion = self._hinge_adv_loss_clamped if clamped_generator else self._hinge_adv_loss_unclamped
-        self.fake_criterion = self._hinge_fake_loss
-        self.real_criterion = self._hinge_real_loss
+        for fft_size, hop_size, win_size in zip(self.fft_sizes, self.hop_sizes, self.win_sizes):
+            pred_mag = self._stft(pred, fft_size, hop_size, win_size)      # [B, F, T]
+            target_mag = self._stft(target, fft_size, hop_size, win_size)  # [B, F, T]
 
-    def forward(
-        self, p_fakes: List[Tensor], p_reals: Optional[List[Tensor]] = None
-    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
-        # Generator adversarial loss
-        if p_reals is None:
-            adv_loss = 0.0
-            for p_fake in p_fakes:
-                adv_loss += self.adv_criterion(p_fake)
-            return adv_loss
+            # Per-sample Frobenius norms
+            flat_target = target_mag.reshape(target_mag.size(0), -1)           # [B, F*T]
+            flat_diff = (target_mag - pred_mag).reshape(target_mag.size(0), -1)
+            target_nrg = torch.norm(flat_target, p=2, dim=1)                # [B]
+            diff_nrg = torch.norm(flat_diff, p=2, dim=1)                    # [B]
 
-        # Discriminator adversarial loss
-        else:
-            fake_loss, real_loss = 0.0, 0.0
-            for p_fake, p_real in zip(p_fakes, p_reals):
-                fake_loss += self.fake_criterion(p_fake)
-                real_loss += self.real_criterion(p_real)
-            return fake_loss, real_loss
+            # Mask out silent samples (SC is undefined for zero-energy)
+            mask = target_nrg > 1e-4
+            if mask.any():
+                sc_loss += (diff_nrg[mask] / target_nrg[mask]).mean()
 
-    def _hinge_adv_loss_clamped(self, x: Tensor) -> Tensor:
-        """Clamped hinge loss for generator: max{0, 1 - D(fake)}. Wavehax-aligned."""
-        return -torch.mean(torch.min(x - 1, x.new_zeros(x.size())))
+            # Log magnitude loss — safe for all samples (clamp avoids -inf)
+            mag_loss += F.l1_loss(
+                torch.log(pred_mag.clamp(min=1e-5)),
+                torch.log(target_mag.clamp(min=1e-5)),
+            )
 
-    def _hinge_adv_loss_unclamped(self, x: Tensor) -> Tensor:
-        """Unclamped hinge loss for generator: -D(fake).mean()."""
-        return -x.mean()
-
-    def _hinge_real_loss(self, x: Tensor) -> Tensor:
-        """Calculate hinge loss for real samples."""
-        return -torch.mean(torch.min(x - 1, x.new_zeros(x.size())))
-
-    def _hinge_fake_loss(self, x: Tensor) -> Tensor:
-        """Calculate hinge loss for fake samples."""
-        return -torch.mean(torch.min(-x - 1, x.new_zeros(x.size())))
-
-
-class MRSTFTLoss(torch.nn.Module):
-    def __init__(self, sample_rate: int, fmin: float = None, fmin_weight: float = 0.1):
-        super().__init__()
-
-        resolutions = [512, 1024, 2048, 4096]
-
-        self.losses = torch.nn.ModuleList([
-            STFTLoss(
-                fft_size=fft_size,
-                hop_size=fft_size // 4,
-                win_length=fft_size,
-                window="hann_window",
-                sample_rate=sample_rate,
-                fmin=fmin,
-                fmin_weight=fmin_weight,
-                log_eps=1e-5,
-            ) for fft_size in resolutions
-        ])
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return sum(loss(x, y) for loss in self.losses) / len(self.losses)
+        sc_loss = sc_loss / len(self.fft_sizes) if sc_loss != 0.0 else 0.0
+        mag_loss = mag_loss / len(self.fft_sizes)
+        return sc_loss + mag_loss

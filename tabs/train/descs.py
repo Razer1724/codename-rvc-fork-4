@@ -121,7 +121,7 @@ NORMALIZATION_INFO = textwrap.dedent("""\
 - **post_peak_rvc:** Peak post-norm with alpha blend
 ( Peak [ max amp * alpha] norm of each slice. )
 - **post_rms:** RMS-based post-norm
-( RMS [-18 dBFS target] norm of each slice. )
+( Configurable RMS target (dBFS) for each slice. )
 """)
 
 

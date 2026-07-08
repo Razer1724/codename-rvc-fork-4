@@ -8,10 +8,10 @@ from torch.nn import functional as F
 from typing import Optional
 
 from rvc.lib.algorithm.commons import sequence_mask
-from rvc.lib.algorithm.transformer_encoder_rvc import TransformerEncoderRVC
+from rvc.lib.algorithm.transformer_encoder import TransformerEncoder
 
 
-class TextEncoderRVC(nn.Module):
+class TextEncoder(nn.Module):
     """
     Text Encoder.
 
@@ -38,14 +38,14 @@ class TextEncoderRVC(nn.Module):
         embedding_dim: int,
         f0: bool = True,
     ):
-        super(TextEncoderRVC, self).__init__()
+        super(TextEncoder, self).__init__()
         self.out_channels = out_channels
         self.hidden_channels = hidden_channels
         self.emb_phone = nn.Linear(embedding_dim, hidden_channels)
         self.lrelu = nn.LeakyReLU(0.1, inplace=True)
         self.emb_pitch = torch.nn.Embedding(256, hidden_channels) if f0 else None
 
-        self.encoder = TransformerEncoderRVC(
+        self.encoder = TransformerEncoder(
             hidden_channels,
             filter_channels,
             n_heads,

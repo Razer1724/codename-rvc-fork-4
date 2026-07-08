@@ -6,15 +6,11 @@ import random
 from rvc.lib.algorithm import generators
 from rvc.lib.algorithm.commons import slice_segments, rand_slice_segments
 
-# Normalizing Flows
-from rvc.lib.algorithm.normalizing_flow_rvc import ResidualCouplingBlock
-from rvc.lib.algorithm.normalizing_flow_vits2 import ResidualCouplingTransformersBlock
-
-# Text Encoders
-from rvc.lib.algorithm.text_encoder_rvc import TextEncoderRVC
-from rvc.lib.algorithm.text_encoder_vits2 import TextEncoderVITS2
-
-# Posterior Encoders
+# Normalizing Flow
+from rvc.lib.algorithm.normalizing_flow import ResidualCouplingBlock
+# Text Encoder
+from rvc.lib.algorithm.text_encoder import TextEncoder
+# Posterior Encoder
 from rvc.lib.algorithm.posterior_encoder import PosteriorEncoder
 
 
@@ -46,7 +42,6 @@ class Synthesizer(torch.nn.Module):
         vocoder: str = "HiFi-GAN",
         checkpointing: bool = False,
         # Other
-        vits2_mode: bool = False,
         use_2_sample_kl: bool = False,
         # RingFormer
         gen_istft_n_fft: int = 120,
@@ -57,31 +52,8 @@ class Synthesizer(torch.nn.Module):
         self.segment_size = segment_size
         self.use_f0 = use_f0
         self.vocoder = vocoder
-        self.vits2_mode = vits2_mode
         self.sr = sr
         self.use_2_sample_kl = use_2_sample_kl
-
-
-        # ------   [ TextEncoder ] Maps extracted features to latent space (p)   ----------------------------------------------------
-        enc_p_kwargs = {
-            "out_channels": inter_channels,
-            "hidden_channels": hidden_channels,
-            "filter_channels": filter_channels,
-            "n_heads": n_heads,
-            "n_layers": n_layers,
-            "kernel_size": kernel_size,
-            "p_dropout": p_dropout,
-            "embedding_dim": text_enc_hidden_dim,
-            "f0": use_f0,
-        }
-
-        if vits2_mode:
-            enc_p_kwargs["gin_channels"] = gin_channels # Vits2 TextEncoder needs gin channels since it's speaker-conditioned
-            TextEncoderClass = TextEncoderVITS2
-        else:
-            TextEncoderClass = TextEncoderRVC
-
-        self.enc_p = TextEncoderClass(**enc_p_kwargs)
 
 
         # ------   [ Decoder / Vocoder ] Reconstructs audio from latents (z)   ------------------------------------------------------
@@ -120,6 +92,21 @@ class Synthesizer(torch.nn.Module):
                 print("    ██████  Vocoder: NSF-HiFi-GAN")
             else:
                 print(f"    ██████  Vocoder: {vocoder}")
+
+
+
+        # ------   [ TextEncoder ] Maps extracted features to latent space (p)   ----------------------------------------------------
+        self.enc_p = TextEncoder(
+            out_channels=inter_channels,
+            hidden_channels=hidden_channels,
+            filter_channels=filter_channels,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            p_dropout=p_dropout,
+            embedding_dim=text_enc_hidden_dim,
+            f0=use_f0,
+        )
 
 
         # ------   [ Posterior Encoder ] Extracts latents (z) from target audio (training only)   -----------------------------------
@@ -189,10 +176,7 @@ class Synthesizer(torch.nn.Module):
         """
         g = self.emb_g(ds).unsqueeze(-1)
 
-        if self.vits2_mode:
-            m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths, g=g)
-        else:
-            m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
+        m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
         if spec is not None:
             # Posterior
@@ -261,13 +245,11 @@ class Synthesizer(torch.nn.Module):
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
 
+        # Embedding
         g = self.emb_g(sid).unsqueeze(-1)
 
         # TextEncoder
-        if self.vits2_mode:
-            m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths, g=g)
-        else:
-            m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
+        m_p, logs_p, x_mask = self.enc_p(phone=phone, pitch=pitch, lengths=phone_lengths)
 
         # Flow
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask

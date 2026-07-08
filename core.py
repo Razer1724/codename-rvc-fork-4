@@ -439,7 +439,8 @@ def run_preprocess_script(
     normalization_mode: str = "post_rms",
     loading_resampling: str = "librosa",
     use_smart_cutter: bool = False,
-    dataset_format: str = "WAV"
+    dataset_format: str = "WAV",
+    rms_norm_db: float = -18.0
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -461,7 +462,8 @@ def run_preprocess_script(
                 normalization_mode,
                 loading_resampling,
                 use_smart_cutter,
-                dataset_format
+                dataset_format,
+                rms_norm_db,
             ],
         ),
     ]
@@ -529,18 +531,19 @@ def run_train_script(
     d_pretrained_path: str = None,
     vocoder: str = "HiFi-GAN",
     architecture: str = "RVC",
-    optimizer: str = "AdamW",
-    adversarial_loss: str = "lsgan",
+    optimizer_choice_g: str = "AdamW",
+    optimizer_choice_d: str = "AdamW",
     use_checkpointing: bool = False,
     use_tf32: bool = False,
     use_benchmark: bool = True,
     use_deterministic: bool = False,
     spectral_loss: str = "L1 Mel Loss",
-    lr_scheduler: str = "exp decay step",
-    exp_decay_gamma: str = "0.999875",
+    lr_scheduler_g: str = "exp decay step",
+    lr_scheduler_d: str = "exp decay step",
+    exp_decay_gamma_g: str = "0.999875",
+    exp_decay_gamma_d: str = "0.999875",
     use_kl_annealing: bool = False,
     kl_annealing_cycle_duration: int = 3,
-    vits2_mode: bool = False,
     rolling_loss_steps: int = 50,
     grad_clip_scheduling: bool = False,
     grad_clip_steps_duration: int = 0,
@@ -553,7 +556,8 @@ def run_train_script(
     custom_lr_d: float = 1e-4,
     use_lora: bool = False,
     lora_rank: int = 16,
-    
+    use_best_step: bool = False,
+    double_d_updates: bool = False,
 ):
     global training_process
 
@@ -590,18 +594,19 @@ def run_train_script(
                 cleanup,
                 vocoder,
                 architecture,
-                optimizer,
-                adversarial_loss,
+                optimizer_choice_g,
+                optimizer_choice_d,
                 use_checkpointing,
                 use_tf32,
                 use_benchmark,
                 use_deterministic,
                 spectral_loss,
-                lr_scheduler,
-                exp_decay_gamma,
+                lr_scheduler_g,
+                lr_scheduler_d,
+                exp_decay_gamma_g,
+                exp_decay_gamma_d,
                 use_kl_annealing,
                 kl_annealing_cycle_duration,
-                vits2_mode,
                 rolling_loss_steps,
                 grad_clip_scheduling,
                 grad_clip_steps_duration,
@@ -613,7 +618,9 @@ def run_train_script(
                 custom_lr_g,
                 custom_lr_d,
                 use_lora,
-                lora_rank
+                lora_rank,
+                use_best_step,
+                double_d_updates
             ],
         ),
     ]
@@ -2020,18 +2027,18 @@ def parse_arguments():
         default="RVC",
     )  
     train_parser.add_argument(
-        "--optimizer",
+        "--optimizer_choice_g",
         type=str,
-        help="Choose an optimizer used in training.",
-        choices=["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"],
+        choices=["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21", "Sched-Free AdamW", "Sched-Free RAdam"],
+        help="Choose an optimizer for Generator used in training.",
         default="AdamW",
     )
     train_parser.add_argument(
-        "--adversarial_loss",
+        "--optimizer_choice_d",
         type=str,
-        help="Choose an optimizer used in training.",
-        choices=["lsgan", "hinge", "tprls"],
-        default="lsgan",
+        choices=["AdamW", "RAdam", "DiffGrad", "Ranger21", "AdaBelief"],
+        help="Choose an optimizer for Discriminator used in training.",
+        default="AdamW",
     )
     train_parser.add_argument(
         "--use_checkpointing",
@@ -2171,17 +2178,31 @@ def parse_arguments():
         default="L1 Mel Loss",
     )
     train_parser.add_argument(
-        "--lr_scheduler",
+        "--lr_scheduler_g",
         type=str,
         choices=["exp decay step", "exp decay epoch", "cosine annealing", "none"],
-        help="Available schedulers: exp decay step, exp decay epoch, cosine annealing, none ",
+        help="Pick a LR scheduler for generator. Viable: exp decay step, exp decay epoch, cosine annealing, none ",
         default="exp decay",
     )
     train_parser.add_argument(
-        "--exp_decay_gamma",
+        "--lr_scheduler_d",
+        type=str,
+        choices=["exp decay step", "exp decay epoch", "cosine annealing epoch", "none"],
+        help="Pick a LR scheduler for discriminator. Viable: exp decay step, exp decay epoch, cosine annealing, none ",
+        default="exp decay step",
+    )
+    train_parser.add_argument(
+        "--exp_decay_gamma_g",
         type=str,
         choices=["0.9999996", "0.999875", "0.999", "0.9975", "0.995"],
-        help="Pick the gamma for exponential lr decay scheduler",
+        help="Gamma for Generator's exponential decay scheduler.",
+        default="0.999875",
+    )
+    train_parser.add_argument(
+        "--exp_decay_gamma_d",
+        type=str,
+        choices=["0.9999996", "0.999875", "0.999", "0.9975", "0.995"],
+        help="Gamma for Discriminator's exponential decay scheduler.",
         default="0.999875",
     )
     train_parser.add_argument(
@@ -2196,13 +2217,6 @@ def parse_arguments():
         type=int,
         help="Duration of kl annealing phase (in epochs).",
         default=3,
-    )
-    train_parser.add_argument(
-        "--vits2_mode",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Whether to use VITS2 enhancements or not.",
-        default=False,
     )
     train_parser.add_argument(
         "--rolling_loss_steps",
@@ -2594,16 +2608,17 @@ def main():
                 d_pretrained_path=args.d_pretrained_path,
                 vocoder=args.vocoder,
                 architecture=args.architecture,
-                optimizer=args.optimizer,
-                adversarial_loss=args.adversarial_loss,
+                optimizer_choice_g=args.optimizer_choice_g,
+                optimizer_choice_d=args.optimizer_choice_d,
                 use_checkpointing=args.use_checkpointing,
                 use_tf32=args.use_tf32,
                 use_benchmark=args.use_benchmark,
                 use_deterministic=args.use_deterministic,
                 spectral_loss=args.spectral_loss,
-                lr_scheduler=args.lr_scheduler,
-                exp_decay_gamma=args.exp_decay_gamma,
-                vits2_mode=args.vits2_mode,
+                lr_scheduler_g=args.lr_scheduler_g,
+                lr_scheduler_d=args.lr_scheduler_d,
+                exp_decay_gamma_g=args.exp_decay_gamma_g,
+                exp_decay_gamma_d=args.exp_decay_gamma_d,
                 rolling_loss_steps=args.rolling_loss_steps,
                 grad_clip_scheduling=args.grad_clip_scheduling,
                 grad_clip_steps_duration=args.grad_clip_steps_duration,

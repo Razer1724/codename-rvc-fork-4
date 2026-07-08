@@ -274,13 +274,13 @@ fp16_check = None
 if microarchitecture_capability_checker():
     # Ampere-Microarchitecture and higher viable:
     initial_optimizer = "AdamW"
-    initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
+    initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
     architecture_choices = ["RVC", "Fork/Applio", "Fork"]
     fp16_check = True
 else:
     # Below Ampere-Microarchitecture viable:
     initial_optimizer = "AdamW"
-    initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
+    initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
     architecture_choices = ["RVC", "Fork/Applio"]
     fp16_check = True
 
@@ -288,7 +288,7 @@ else:
 if fp16_check:
     if check_if_fp16():
         initial_optimizer = "AdamW"
-        initial_optimizer_choices = ["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21"]
+        initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
 
 
 # Train Tab
@@ -331,30 +331,24 @@ def train_tab():
                     visible=True,
                     key='architecture'
                 )
-                vits2_mode = gr.Checkbox(
-                    label="Enable VITS2 modeㅤ( Requires compatible pretrains! )",
-                    value=False,
-                    interactive=True,
-                    visible=True,
-                )
                 vocoder_arch = gr.State("hifi_refine")
-                optimizer = gr.Radio(
-                    label="Optimizer",
+                optimizer_choice_g = gr.Radio(
+                    label="Optimizer (G)",
                     info=OPTIMIZER_INFO,
                     choices=initial_optimizer_choices,
                     value=initial_optimizer,
                     interactive=True,
                     visible=True,
-                    key='optimizer'
+                    key='optimizer_choice_g'
                 )
-                adversarial_loss = gr.Radio(
-                    label="Adversarial loss",
-                    info="Choose an adversarial loss used in training: \n  \n- **lsgan:** Default and one you should use.  \n- **hinge:** Margin-based. Provides stronger discriminator pressure early in training. \n ( Unstable on small and / or noisy datasets. Likely requires learning rate tweaking. ) \n- **tprls:** Relativistic regularizer on top of lsgan. Experimental. \n ( Might have use in outlier-heavy or very noisy / garbage datasets. )",
-                    choices=["lsgan", "hinge", "tprls"],
-                    value="lsgan",
+                optimizer_choice_d = gr.Radio(
+                    label="Optimizer (D)",
+                    info="",
+                    choices=initial_optimizer_choices,
+                    value=initial_optimizer,
                     interactive=True,
                     visible=True,
-                    key='adversarial_loss'
+                    key='optimizer_choice_d'
                 )
             with gr.Column():
                 sampling_rate = gr.Radio(
@@ -442,7 +436,7 @@ def train_tab():
                 use_smart_cutter = gr.Checkbox(
                     label="SmartCutter",
                     info=SMARTCUTTER_INFO,
-                    value=True,
+                    value=False,
                     interactive=True,
                     visible=True,
                     key='use_smart_cutter'
@@ -456,6 +450,15 @@ def train_tab():
                     visible=True,
                     scale=0.6,
                     key='normalization_mode'
+                )
+            with gr.Row():
+                rms_norm_db = gr.Slider(
+                    -24.0, -3.0, -18.0, step=1.0,
+                    label="RMS Target (dBFS)",
+                    info="Only used when 'post_rms' mode is selected above.",
+                    interactive=True,
+                    visible="hidden",
+                    key='rms_norm_db'
                 )
             with gr.Row():
                 cut_preprocess = gr.Radio(
@@ -542,7 +545,8 @@ def train_tab():
                     normalization_mode,
                     loading_resampling,
                     use_smart_cutter,
-                    dataset_format
+                    dataset_format,
+                    rms_norm_db,
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -783,27 +787,44 @@ def train_tab():
                     spectral_loss = gr.Radio(
                         label="Spectral loss",
                         info=SPECTRAL_LOSS_INFO,
-                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Multi-Res STFT Loss", "Hybrid L1", "Hybrid MS"],
+                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1", "Hybrid MS"],
                         value="L1 Mel Loss",
                         interactive=True,
                         key='spectral_loss'
                     )
-                    lr_scheduler = gr.Radio(
-                        label="Learning rate scheduler",
+                    lr_scheduler_g = gr.Radio(
+                        label="LR scheduler (G)",
                         info=LR_SCHEDULER_INFO,
                         choices=["exp decay step", "exp decay epoch", "cosine annealing", "none"],
                         value="exp decay epoch",
                         interactive=True,
-                        key='lr_scheduler'
+                        key='lr_scheduler_g'
                     )
-                    exp_decay_gamma = gr.Radio(
-                        label="Exponential decay gamma",
+                    lr_scheduler_d = gr.Radio(
+                        label="LR scheduler (D)",
+                        info="",
+                        choices=["exp decay step", "exp decay epoch", "cosine annealing", "none"],
+                        value="exp decay epoch",
+                        interactive=True,
+                        key='lr_scheduler_d'
+                    )
+                    exp_decay_gamma_g = gr.Radio(
+                        label="Exp decay gamma (G)",
                         info="Gamma / decay factor for exponential lr scheduler",
                         choices=["0.9999996", "0.999875", "0.999", "0.9975", "0.995"],
                         value="0.999875",
                         interactive=True,
                         visible=True,
-                        key='exp_decay_gamma'
+                        key='exp_decay_gamma_g'
+                    )
+                    exp_decay_gamma_d = gr.Radio(
+                        label="Exp decay gamma (D)",
+                        info="",
+                        choices=["0.9999996", "0.999875", "0.999", "0.9975", "0.995"],
+                        value="0.999875",
+                        interactive=True,
+                        visible=True,
+                        key='exp_decay_gamma_d'
                     )
                     use_kl_annealing = gr.Checkbox(
                         label="KL loss annealing",
@@ -822,6 +843,20 @@ def train_tab():
                         interactive=True,
                         visible="hidden",
                         key='kl_annealing_cycle_duration'
+                    )
+                    use_best_step = gr.Checkbox(
+                        label="Best in-epoch step",
+                        info="Tracks the step with lowest FM+Mel loss each epoch and uses those weights for eval preview and model extraction.",
+                        value=False,
+                        interactive=True,
+                        key='use_best_step'
+                    )
+                    double_d_updates = gr.Checkbox(
+                        label="Double Discriminator Update",
+                        info="Runs the discriminator backward/update step twice per batch. Gives D more gradient signal on small datasets without changing LR.",
+                        value=False,
+                        interactive=True,
+                        key='double_d_updates'
                     )
             with gr.Column():
                 custom_pretrained = gr.Checkbox(
@@ -931,17 +966,17 @@ def train_tab():
                     interactive=True,
                     key='use_lora'
                 )
-                with gr.Column(visible=False) as lora_settings:
-                    with gr.Accordion("LoRA settings"):
-                        lora_rank = gr.Slider(
-                            1, 128, 16, step=1,
-                            label="LoRA rank",
-                            info="Higher rank = more capacity, but also more overfitting risk. Start off with: 16. \n If you want to experiment / find a match for your case: 4, 8, 16, 32, 64, 128",
-                            interactive=True,
-                            key='lora_rank'
-                        )
-
-                index_algorithm = gr.Radio(
+                with gr.Row():
+                    lora_rank = gr.Radio(
+                        [4, 8, 16, 32, 64, 128], value=16,
+                        label="LoRA rank",
+                        info="Higher rank = more capacity, but also more overfitting risk. Start with: 16.",
+                        interactive=True,
+                        visible="hidden",
+                        key='lora_rank'
+                    )
+                with gr.Row():
+                    index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
                     choices=["Auto", "Faiss", "KMeans"],
@@ -995,18 +1030,19 @@ def train_tab():
                     d_pretrained_path,
                     vocoder,
                     architecture,
-                    optimizer,
-                    adversarial_loss,
+                    optimizer_choice_g,
+                    optimizer_choice_d,
                     use_checkpointing,
                     use_tf32,
                     use_benchmark,
                     use_deterministic,
                     spectral_loss,
-                    lr_scheduler,
-                    exp_decay_gamma,
+                    lr_scheduler_g,
+                    lr_scheduler_d,
+                    exp_decay_gamma_g,
+                    exp_decay_gamma_d,
                     use_kl_annealing,
                     kl_annealing_cycle_duration,
-                    vits2_mode,
                     rolling_loss_steps,
                     grad_clip_scheduling,
                     grad_clip_steps_duration,
@@ -1019,6 +1055,8 @@ def train_tab():
                     custom_lr_d,
                     use_lora,
                     lora_rank,
+                    use_best_step,
+                    double_d_updates,
                 ],
                 outputs=[train_output_info],
             )
@@ -1201,13 +1239,18 @@ def train_tab():
                     return {"visible": True, "__type__": "update"}
                 return {"visible": "hidden", "__type__": "update"}
 
+            def toggle_rms_norm_slider(norm_mode):
+                if norm_mode == "post_rms":
+                    return {"visible": True, "__type__": "update"}
+                return {"visible": "hidden", "__type__": "update"}
+
             saved_components.extend([
                 # Model settings
-                architecture, optimizer, adversarial_loss, vocoder, sampling_rate, cpu_threads, extract_gpu,
+                architecture, optimizer_choice_g, optimizer_choice_d, vocoder, sampling_rate, cpu_threads, extract_gpu,
 
                 # Preprocessing
                 dataset_path, dataset_format, loading_resampling, use_smart_cutter,
-                normalization_mode, cut_preprocess, chunk_len, overlap_len,
+                normalization_mode, rms_norm_db, cut_preprocess, chunk_len, overlap_len,
                 process_effects, noise_reduction, clean_strength,
 
                 # Feature extract
@@ -1219,14 +1262,14 @@ def train_tab():
                 save_only_latest_net_models, save_weight_models, pretrained,
                 cleanup, use_checkpointing,
                 use_tf32, use_benchmark, use_deterministic, spectral_loss,
-                lr_scheduler, exp_decay_gamma,
+                lr_scheduler_g, exp_decay_gamma_g, lr_scheduler_d, exp_decay_gamma_d,
                 custom_pretrained, g_pretrained_path,
                 d_pretrained_path, multiple_gpu, training_gpu, use_warmup,
                 warmup_duration, use_custom_lr, custom_lr_g,
-                custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration, vits2_mode,
+                custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration,
                 rolling_loss_steps, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
-                grad_clip_value_d_release, index_algorithm
+                grad_clip_value_d_release, index_algorithm, use_best_step, double_d_updates
             ])
 
             def save_training_preset(inputs):
@@ -1283,6 +1326,11 @@ def train_tab():
                 fn=update_noise_reduce_slider_visibility,
                 inputs=noise_reduction,
                 outputs=clean_strength,
+            )
+            normalization_mode.change(
+                fn=toggle_rms_norm_slider,
+                inputs=normalization_mode,
+                outputs=rms_norm_db,
             )
             architecture.change(
                 fn=toggle_architecture,
@@ -1358,7 +1406,7 @@ def train_tab():
             use_lora.change(
                 fn=toggle_visible,
                 inputs=[use_lora],
-                outputs=[lora_settings],
+                outputs=[lora_rank],
             )
             use_kl_annealing.change(
                 fn=lambda v: {"visible": True, "__type__": "update"} if v else {"visible": "hidden", "__type__": "update"},
@@ -1370,10 +1418,15 @@ def train_tab():
                 inputs=[grad_clip_scheduling],
                 outputs=[grad_clip_steps_duration, grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release, grad_clip_value_d_release]
             )
-            lr_scheduler.change(
+            lr_scheduler_g.change(
                 fn=toggle_visible_gamma,
-                inputs=[lr_scheduler],
-                outputs=[exp_decay_gamma],
+                inputs=[lr_scheduler_g],
+                outputs=[exp_decay_gamma_g],
+            )
+            lr_scheduler_d.change(
+                fn=toggle_visible_gamma,
+                inputs=[lr_scheduler_d],
+                outputs=[exp_decay_gamma_d],
             )
             multiple_gpu.change(
                 fn=toggle_visible,
