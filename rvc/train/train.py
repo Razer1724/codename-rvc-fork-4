@@ -186,6 +186,8 @@ custom_sid = 1
 use_2_sample_kl = False # Needs more testing, for now disabled. You can still set it to True if you wanna test it out.
 free_bits = 0.1
 
+#optimizer_choice_d = "SGD"
+
 ##################################################################
 
 import logging
@@ -432,6 +434,10 @@ def _make_optimizer(model, choice, lr, num_epochs=None, num_batches=None):
     elif choice == "Sched-Free RAdam":
         from schedulefree import RAdamScheduleFree
         return RAdamScheduleFree(params, lr=lr, betas=(0.8, 0.99), eps=1e-9, weight_decay=0.0, r=0.0, weight_lr_power=2.0, foreach=False, silent_sgd_phase=False)
+
+    elif choice == "SGD":
+        return torch.optim.SGD(params, lr=lr, momentum=0.9, nesterov=True, weight_decay=0.0)
+
 
     else:
         raise ValueError(f"Unknown optimizer choice: {choice}")
@@ -691,7 +697,7 @@ def prepare_schedulers(
                 optim_d, gamma=exp_decay_gamma_d, last_epoch=scheduler_resume_epoch
             )
         elif lr_scheduler_d == "exp decay step":
-            exp_decay_gamma_d_step = exp_decay_gamma_g ** (1.0 / num_batches_per_epoch)
+            exp_decay_gamma_d_step = exp_decay_gamma_d ** (1.0 / num_batches_per_epoch)
             scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
                 optim_d, gamma=exp_decay_gamma_d_step, last_epoch=scheduler_resume_step
             )
