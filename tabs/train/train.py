@@ -959,22 +959,6 @@ def train_tab():
                             key='custom_lr_d'
                         )
 
-                use_lora = gr.Checkbox(
-                    label="LoRA fine-tuning",
-                    info="Low-Rank Adaptation: trains small adapters instead of full weights. Reduces overfitting on small/medium datasets and preserves pretrained model's generalization.",
-                    value=False,
-                    interactive=True,
-                    key='use_lora'
-                )
-                with gr.Row():
-                    lora_rank = gr.Radio(
-                        [4, 8, 16, 32, 64, 128], value=16,
-                        label="LoRA rank",
-                        info="Higher rank = more capacity, but also more overfitting risk. Start with: 16.",
-                        interactive=True,
-                        visible="hidden",
-                        key='lora_rank'
-                    )
                 with gr.Row():
                     index_algorithm = gr.Radio(
                     label="Index Algorithm",
@@ -1053,8 +1037,6 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
-                    use_lora,
-                    lora_rank,
                     use_best_step,
                     double_d_updates,
                 ],
@@ -1402,11 +1384,6 @@ def train_tab():
                 fn=toggle_visible,
                 inputs=[use_custom_lr],
                 outputs=[custom_lr_settings],
-            )
-            use_lora.change(
-                fn=toggle_visible,
-                inputs=[use_lora],
-                outputs=[lora_rank],
             )
             use_kl_annealing.change(
                 fn=lambda v: {"visible": True, "__type__": "update"} if v else {"visible": "hidden", "__type__": "update"},

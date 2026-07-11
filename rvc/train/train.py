@@ -80,7 +80,6 @@ from mel_processing import (
 )
 from rvc.train.process.extract_model import extract_model
 from rvc.lib.algorithm import commons
-from rvc.lib.algorithm.lora import apply_lora, merge_lora
 from rvc.train.utils import replace_keys_in_dict
 
 # Parse command line arguments start region ===========================
@@ -124,10 +123,8 @@ use_custom_lr = strtobool(sys.argv[36])
 custom_lr_g, custom_lr_d = (float(sys.argv[37]), float(sys.argv[38])) if use_custom_lr else (None, None)
 assert not use_custom_lr or (custom_lr_g and custom_lr_d), "Invalid custom LR values."
 
-use_lora = bool(strtobool(sys.argv[39]))
-lora_rank = int(sys.argv[40])
-use_best_step = bool(strtobool(sys.argv[41]))
-double_d_updates = bool(strtobool(sys.argv[42]))
+use_best_step = bool(strtobool(sys.argv[39]))
+double_d_updates = bool(strtobool(sys.argv[40]))
 
 
 
@@ -185,8 +182,6 @@ custom_sid = 1
 
 use_2_sample_kl = False # Needs more testing, for now disabled. You can still set it to True if you wanna test it out.
 free_bits = 0.1
-
-#optimizer_choice_d = "SGD"
 
 ##################################################################
 
@@ -277,7 +272,12 @@ def setup_env_and_distr(rank, n_gpus, device, device_id, config):
     if torch.cuda.is_available():
         torch.cuda.set_device(device_id)
 
-def prepare_dataloaders(config, n_gpus, rank, batch_size):
+def endless_loader(loader):
+    while True:
+        for batch in loader:
+            yield batch
+
+def prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=False):
     from data_utils import (
         DistributedBucketSampler,
         TextAudioCollateMultiNSFsid,
@@ -307,7 +307,28 @@ def prepare_dataloaders(config, n_gpus, rank, batch_size):
     )
     train_loader_safety(train_loader)
 
-    return train_loader
+    extra_d_loader = None
+    if build_extra_d_loader:
+        extra_d_sampler = DistributedBucketSampler(
+            train_dataset,
+            batch_size * n_gpus,
+            [50, 100, 200, 300, 400, 500, 600, 700, 800, 900],
+            num_replicas=n_gpus,
+            rank=rank,
+            shuffle=True
+        )
+        extra_d_loader = DataLoader(
+            train_dataset,
+            num_workers=2,
+            shuffle=False,
+            pin_memory=True,
+            collate_fn=collate_fn,
+            batch_sampler=extra_d_sampler,
+            persistent_workers=enable_persistent_workers,
+            prefetch_factor=4
+        )
+
+    return train_loader, extra_d_loader
 
 def get_g_model(config, sample_rate, vocoder, use_checkpointing):
     from rvc.lib.algorithm.synthesizers import Synthesizer
@@ -429,16 +450,11 @@ def _make_optimizer(model, choice, lr, num_epochs=None, num_batches=None):
 
     elif choice == "Sched-Free AdamW":
         from schedulefree import AdamWScheduleFree
-        return AdamWScheduleFree(params, lr=lr, betas=(0.9, 0.99), eps=1e-9, weight_decay=0.0, warmup_steps=warmup_duration if use_warmup else 0)
+        return AdamWScheduleFree(params, lr=lr, betas=(0.8, 0.99), eps=1e-9, weight_decay=0.01, warmup_steps=warmup_duration if use_warmup else 0)
 
     elif choice == "Sched-Free RAdam":
         from schedulefree import RAdamScheduleFree
         return RAdamScheduleFree(params, lr=lr, betas=(0.8, 0.99), eps=1e-9, weight_decay=0.0, r=0.0, weight_lr_power=2.0, foreach=False, silent_sgd_phase=False)
-
-    elif choice == "SGD":
-        return torch.optim.SGD(params, lr=lr, momentum=0.9, nesterov=True, weight_decay=0.0)
-
-
     else:
         raise ValueError(f"Unknown optimizer choice: {choice}")
 
@@ -476,58 +492,6 @@ def setup_models_for_training(net_g, net_d, device, device_id, n_gpus):
     return net_g, net_d
 
 
-def _apply_lora_to_generator(net_g, rank):
-    model_g = net_g.module if hasattr(net_g, "module") else net_g
-    apply_lora(model_g, r=lora_rank)
-    for name, param in model_g.named_parameters():
-        if "lora_" in name:
-            pass
-        elif name.endswith(".bias"):
-            pass
-        else:
-            param.requires_grad = False
-    for emb_name in ["emb_g", "enc_p.emb_pitch"]:
-        emb = model_g
-        for part in emb_name.split("."):
-            emb = getattr(emb, part, None)
-            if emb is None:
-                break
-        if emb is not None and hasattr(emb, "weight"):
-            emb.weight.requires_grad = True
-
-    # Re-enable relative position embeddings ~ frozen by default but essential
-    # for adapting prosody timing to languages unlike the base model's training data.
-    rel_count = 0
-    for name, param in model_g.named_parameters():
-        if name.endswith(("emb_rel_k", "emb_rel_v")):
-            param.requires_grad = True
-            rel_count += 1
-
-    if rank == 0:
-        total_lora = sum(p.numel() for n, p in model_g.named_parameters() if "lora_" in n)
-        total_trainable = sum(p.numel() for p in model_g.parameters() if p.requires_grad)
-        total_all = sum(p.numel() for p in model_g.parameters())
-        # Count wrappers per component
-        wrappers = {"enc_p": 0, "dec": 0, "enc_q": 0, "flow": 0, "other": 0}
-        for n, m in model_g.named_modules():
-            if hasattr(m, "lora_A"):
-                key = n.split(".")[0]
-                if key in wrappers:
-                    wrappers[key] += 1
-                else:
-                    wrappers["other"] += 1
-        print(f"[ ] LoRA r={lora_rank}: {total_lora:,} adapter params ({total_trainable:,} trainable / {total_all:,} total)")
-        for comp in ["enc_p", "dec", "enc_q", "flow"]:
-            if wrappers[comp]:
-                print(f"      {comp}: {wrappers[comp]} layers")
-        if wrappers["other"]:
-            print(f"      other: {wrappers['other']} layers")
-        dirs = ["emb_g.weight", "enc_p.emb_pitch.weight"]
-        if rel_count:
-            dirs.append(f"{rel_count} rel_pos embeds")
-        print(f"      + {', '.join(dirs)} (direct)")
-
-
 def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkpointing, sample_rate, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader, device, device_id, n_gpus, rank):
     # Init the models
     net_g = get_g_model(config, sample_rate, vocoder, use_checkpointing)
@@ -551,10 +515,6 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
         d_checkpoint_path = get_highest_checkpoint("D_")
         if g_checkpoint_path and d_checkpoint_path:
 
-            # Apply LoRA before loading checkpoint so LoRA keys exist
-            if use_lora and lora_rank > 0:
-                _apply_lora_to_generator(net_g, rank)
-
             # Move the models to an appropriate device ( And optionally wrap with DDP for multi-gpu )
             net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
 
@@ -562,8 +522,8 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
 
             # Load the model and optim states
-            _, _, _, epoch_str, gradscaler_dict = load_checkpoint(g_checkpoint_path, net_g, optim_g, strict_load)
-            _, _, _, epoch_str, _ = load_checkpoint(d_checkpoint_path, net_d, optim_d, strict_load)
+            _, _, _, epoch_str, gradscaler_dict_g = load_checkpoint(g_checkpoint_path, net_g, optim_g, strict_load)
+            _, _, _, epoch_str, gradscaler_dict_d = load_checkpoint(d_checkpoint_path, net_d, optim_d, strict_load)
 
             if override_pretrain_lr:
                 new_lr_for_pretrain = new_pretrain_lr
@@ -582,9 +542,6 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
             epoch_str = (global_step // len(train_loader)) + 1
             print(f"[RESUMING] (G) & (D) at global_step: {global_step} and epoch count: {epoch_str - 1}")
 
-            # Re-create optimizers for LoRA (only track trainable params)
-            if use_lora and lora_rank > 0:
-                optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
         else:
             raise FileNotFoundError("No checkpoints found.")
 
@@ -592,7 +549,8 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
     # If no checkpoints are available, using the Pretrains directly
         epoch_str = 1
         global_step = 0
-        gradscaler_dict = {}
+        gradscaler_dict_g = {}
+        gradscaler_dict_d = {}
 
         # Loading the pretrained Generator model
         if pretrainG not in ["", "None"]:
@@ -629,17 +587,13 @@ def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkp
 
             net_d.load_state_dict(state_dict, strict=True)
 
-        # Apply LoRA after loading pretrained weights (wraps convs with loaded weights preserved)
-        if use_lora and lora_rank > 0:
-            _apply_lora_to_generator(net_g, rank)
-
         # Load the models and optionally wrap with DDP
         net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
 
         # Init the optimizers
         optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
 
-    return net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict
+    return net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict_g, gradscaler_dict_d
 
 
 def prepare_schedulers(
@@ -888,7 +842,7 @@ def run(
     setup_env_and_distr(rank, n_gpus, device, device_id, config)
 
     # Dataloading and loaders preparation
-    train_loader = prepare_dataloaders(config, n_gpus, rank, batch_size)
+    train_loader, extra_d_loader = prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=double_d_updates)
 
     # Spk dim verif
     spk_dim = verify_spk_dim(config, model_info_path, experiment_dir, latest_checkpoint_path, rank, pretrainG)
@@ -913,13 +867,13 @@ def run(
 
 
     # Loading of models and optims
-    net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict = load_models_and_optimizers(
+    net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict_g, gradscaler_dict_d = load_models_and_optimizers(
         config,
         pretrainG,
         pretrainD,
         vocoder,
         use_checkpointing,
-        sample_rate, 
+        sample_rate,
         optimizer_choice_g,
         optimizer_choice_d,
         custom_lr_g,
@@ -975,10 +929,15 @@ def run(
     hann_window = torch.hann_window(config.model.gen_istft_n_fft).to(device) if vocoder in ["RingFormer_v1", "RingFormer_v2"] else None
 
     # GradScaler for FP16 training
-    gradscaler = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
-    if len(gradscaler_dict) > 0:
-        gradscaler.load_state_dict(gradscaler_dict)
-        print("[INIT] Loading gradscaler state dict - FP16")
+    gradscaler_g = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
+    gradscaler_d = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
+
+    if len(gradscaler_dict_g) > 0 and len(gradscaler_dict_d) > 0:
+        gradscaler_g.load_state_dict(gradscaler_dict_g)
+        gradscaler_d.load_state_dict(gradscaler_dict_d)
+        print("[INIT] Loading G/D gradscaler state dicts")
+    else:
+        print("Something got fucked up ------asioshdfu9203u0vsdvuds09gs90f8sd90f8sv90v8f0sf98dfva098vs[09hs8d09d[hdf89h")
 
     # Reference sample for live-infer
     reference = get_reference_sample(train_loader, device, config)
@@ -987,6 +946,8 @@ def run(
     cache = []
 
     for epoch in range(epoch_str, total_epoch_count + 1):
+        if extra_d_loader is not None:
+            extra_d_loader.batch_sampler.set_epoch(epoch)
         should_stop = training_loop(
             rank,
             epoch,
@@ -1006,10 +967,12 @@ def run(
             reference,
             fn_spectral_loss,
             n_gpus,
-            gradscaler,
+            gradscaler_g,
+            gradscaler_d,
             fn_spectral_loss2,
             hann_window,
-            stopper=stopper
+            stopper=stopper,
+            extra_d_loader=extra_d_loader,
         )
 
         if use_warmup and epoch <= warmup_duration:
@@ -1064,10 +1027,12 @@ def training_loop(
     reference,
     fn_spectral_loss,
     n_gpus,
-    gradscaler,
+    gradscaler_g,
+    gradscaler_d,
     fn_spectral_loss2=None,
     hann_window=None,
-    stopper=None
+    stopper=None,
+    extra_d_loader=None
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -1089,7 +1054,8 @@ def training_loop(
         reference (list): Contains reference sample. Either custom or from train loader.
         fn_spectral_loss: spectral loss;  can be l1, multi-scale or ms-stft.
         fn_spectral_loss2: 2nd spectral loss
-        gradscaler: gradscaler for fp16
+        gradscaler_g: gradscaler for fp16 - Used for Generator
+        gradscaler_d: gradscaler for fp16 - Used for Discriminator
         hann_window: hann window used for RingFormer
     """
     global global_step, warmup_completed, use_lr_scheduler_g, lr_scheduler_g, use_lr_scheduler_d, lr_scheduler_d, use_warmup, use_best_step
@@ -1099,11 +1065,12 @@ def training_loop(
     scheduler_g, scheduler_d = schedulers if schedulers is not None else (None, None)
 
     train_loader = train_loader if train_loader is not None else None
+    train_loader.batch_sampler.set_epoch(epoch)
+
+    extra_d_train_loader = endless_loader(extra_d_loader) if extra_d_loader is not None else None
 
     if writers is not None:
         writer = writers[0]
-    
-    train_loader.batch_sampler.set_epoch(epoch)
 
     # Best in-epoch step tracking
     if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam") and use_best_step:
@@ -1186,16 +1153,39 @@ def training_loop(
                 grad_clip_value_g = clip_grad_norm_override_value_g
                 grad_clip_value_d = clip_grad_norm_override_value_d
 
+
             # Device handling
             if device.type == "cuda":
                 info = [tensor.cuda(device_id, non_blocking=True) for tensor in info]
             elif device.type != "cuda":
                 info = [tensor.to(device) for tensor in info]
 
-            # Tuple unpacking
+            if double_d_updates:
+                info_extra = next(extra_d_train_loader)
+                # Device handling
+                if device.type == "cuda":
+                    info_extra = [t.cuda(device_id, non_blocking=True) for t in info_extra]
+                elif device.type != "cuda":
+                    info_extra = [t.to(device) for t in info_extra]
+
+
+            # Batch unpacking ( Main )
             (phone, phone_lengths, pitch, pitchf, spec, spec_lengths, y, y_lengths, sid) = info
 
-            # Generator forward pass:
+            # Extra batch unpacking ( Used for additional disc update )
+            if double_d_updates:
+                (phone_ex, phone_lengths_ex, pitch_ex, pitchf_ex, spec_ex, spec_lengths_ex, y_ex, y_lengths_ex, sid_ex) = info_extra
+
+
+            # Generator extra forward pass:
+            if double_d_updates:
+                with torch.no_grad(), autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
+                    model_output_ex = net_g(phone_ex, phone_lengths_ex, pitch_ex, pitchf_ex, spec_ex, spec_lengths_ex, sid_ex)
+                    y_hat_ex, ids_slice_ex, *_ = model_output_ex
+                y_ex_sliced = commons.slice_segments(y_ex, ids_slice_ex * config.data.hop_length, config.train.segment_size, dim=3)
+
+
+            # Generator main forward pass:
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
                 model_output = net_g(phone, phone_lengths, pitch, pitchf, spec, spec_lengths, sid)
 
@@ -1226,32 +1216,52 @@ def training_loop(
                 loss_sd = (loss_magnitude + loss_phase) * 0.7
 
 
-            # Discriminator forward pass:
-            with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
-                y_hat_d = y_hat.detach()
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat_d)
+            # Discriminator updates (independent batches when double)
+            d_updates = [(y, y_hat.detach())]
+            if double_d_updates:
+                d_updates.insert(0, (y_ex_sliced, y_hat_ex.detach()))
 
-            # Compute discriminator loss:
-            with autocast(device_type="cuda", enabled=False):
-                loss_disc, loss_disc_real, loss_disc_fake = discriminator_loss(y_d_hat_r, y_d_hat_g)
+            _loss_disc_acc, _loss_disc_real_acc, _loss_disc_fake_acc, _grad_norm_d_acc = [], [], [], []
 
+            for y_d_real, y_d_fake in d_updates:
+                with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
+                    y_d_hat_r, y_d_hat_g, _, _ = net_d(y_d_real, y_d_fake)
 
-            # Discriminator backward and update:
-            optim_d.zero_grad(set_to_none=True)
-            if train_dtype == torch.float16:
-                gradscaler.scale(loss_disc).backward() # Scale and backward of the loss
-                gradscaler.unscale_(optim_d) # Unscale
-                scale = gradscaler.get_scale() # To retrieve current gradscaler's scaling
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
-                gradscaler.step(optim_d) # Optim step
-            else:
-                loss_disc.backward() # Loss backward
-                grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d) # Grad clipping
-                optim_d.step() # Optim step
+                with autocast(device_type="cuda", enabled=False):
+                    loss_disc, loss_disc_real, loss_disc_fake = discriminator_loss(y_d_hat_r, y_d_hat_g)
+
+                optim_d.zero_grad(set_to_none=True)
+                if train_dtype == torch.float16:
+                    gradscaler_d.scale(loss_disc).backward()
+                    gradscaler_d.unscale_(optim_d)
+                    scale_d = gradscaler_d.get_scale()
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d)
+                    gradscaler_d.step(optim_d)
+                    gradscaler_d.update()
+                    skip_lr_sched_d = (scale_d > gradscaler_d.get_scale())
+                else:
+                    loss_disc.backward()
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d)
+                    optim_d.step()
+                    skip_lr_sched_d = False
+
+                # Temp accumulation
+                _loss_disc_acc.append(loss_disc.detach())
+                _loss_disc_real_acc.append(loss_disc_real.detach())
+                _loss_disc_fake_acc.append(loss_disc_fake.detach())
+                _grad_norm_d_acc.append(grad_norm_d)
+
+            # Stack + mean
+            loss_disc = torch.stack(_loss_disc_acc).mean()
+            loss_disc_real = torch.stack(_loss_disc_real_acc).mean()
+            loss_disc_fake = torch.stack(_loss_disc_fake_acc).mean()
+            grad_norm_d = torch.stack(_grad_norm_d_acc).mean()
+
 
             # Run discriminator on generated output
             with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
                 _, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
+
 
             # Compute generator losses:
             with autocast(device_type="cuda", enabled=False):
@@ -1313,17 +1323,19 @@ def training_loop(
             # Generator backward and update:
             optim_g.zero_grad(set_to_none=True)
             if train_dtype == torch.float16:
-                gradscaler.scale(loss_gen_total).backward() # Scale and backward of the loss
-                gradscaler.unscale_(optim_g) # Unscale
+                gradscaler_g.scale(loss_gen_total).backward() # Scale and backward of the loss
+                gradscaler_g.unscale_(optim_g) # Unscale
+                scale_g = gradscaler_g.get_scale() # To retrieve current gradscaler's scaling
                 grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
-                gradscaler.step(optim_g) # Optim step
-                gradscaler.update() # Scaler update, to prepare the scaling for the next iteration
-                skip_lr_sched = (scale > gradscaler.get_scale())
+                gradscaler_g.step(optim_g) # Optim step
+                gradscaler_g.update() # Scaler update, to prepare the scaling for the next iteration
+                skip_lr_sched_g = (scale_g > gradscaler_g.get_scale())
             else:
                 loss_gen_total.backward() # Loss backward
                 grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), max_norm=grad_clip_value_g) # Grad clipping
                 optim_g.step() # Optim step
-                skip_lr_sched = False
+                skip_lr_sched_g = False
+
 
             # Track best step in this epoch (FM + Spectral)
             if use_best_step:
@@ -1335,15 +1347,14 @@ def training_loop(
 
 
             # Per step exp lr decay for generator
-            if not skip_lr_sched: # We skip lr scheduler step if there were nans / infs due to gradscaler's scaling.
-
-
+            if not skip_lr_sched_g: # We skip lr scheduler step if there were nans / infs due to gradscaler's scaling.
                 if use_lr_scheduler_g and (not use_warmup or warmup_completed) and lr_scheduler_g == "exp decay step":
                     scheduler_g.step()
+
+            # Per step exp lr decay for discriminator
+            if not skip_lr_sched_d:
                 if use_lr_scheduler_d and (not use_warmup or warmup_completed) and lr_scheduler_d == "exp decay step":
                     scheduler_d.step()
-
-
 
 
 
@@ -1432,7 +1443,7 @@ def training_loop(
             if early_stopper(
                 stopper, rank, global_step, epoch, architecture, 
                 [net_g, net_d], [optim_g, optim_d], config, 
-                experiment_dir, gradscaler, save_weight_models,
+                experiment_dir, gradscaler_g, gradscaler_d, save_weight_models,
                 model_name, vocoder, n_gpus
             ):
                 return True
@@ -1580,10 +1591,10 @@ def training_loop(
 
 
             # Save Generator checkpoint (live weights; averaging was restored above)
-            save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler)
+            save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler_g)
 
             # Save Discriminator checkpoint
-            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler)
+            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler_d)
 
             # Switch back to train mode after saving
             if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
@@ -1606,31 +1617,8 @@ def training_loop(
             done = True
 
         if model_add:
-            # Use best-step weights for small model
-            if use_best_step and best_state_dict_g is not None:
-                if use_lora and lora_rank > 0:
-                    if rank == 0:
-                        print(f"    ██████  Merging LoRA weights for model extraction (best-step)...")
-                    model_g = net_g.module if hasattr(net_g, "module") else net_g
-                    import copy
-                    model_copy = copy.deepcopy(model_g)
-                    model_copy.load_state_dict(best_state_dict_g)
-                    merge_lora(model_copy, remove_wrappers=True, restore_weight_norm=True)
-                    ckpt = model_copy.state_dict()
-                else:
-                    ckpt = best_state_dict_g
-            else:
-                # Fallback to live weights
-                if use_lora and lora_rank > 0:
-                    if rank == 0:
-                        print(f"    ██████  Merging LoRA weights for model extraction (live)...")
-                    model_g = net_g.module if hasattr(net_g, "module") else net_g
-                    import copy
-                    model_copy = copy.deepcopy(model_g)
-                    merge_lora(model_copy, remove_wrappers=True, restore_weight_norm=True)
-                    ckpt = model_copy.state_dict()
-                else:
-                    ckpt = (net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict())
+            model_g = net_g.module if hasattr(net_g, "module") else net_g
+            ckpt = best_state_dict_g if (use_best_step and best_state_dict_g is not None) else model_g.state_dict()
 
             for m in model_add:
                 if not os.path.exists(m):

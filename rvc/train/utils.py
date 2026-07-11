@@ -461,7 +461,8 @@ def early_stopper(
     optims, 
     config, 
     experiment_dir, 
-    gradscaler, 
+    gradscaler_g,
+    gradscaler_d,
     save_weight_models,
     model_name,
     vocoder,
@@ -478,9 +479,9 @@ def early_stopper(
             d_path = os.path.join(experiment_dir, f"D_{global_step}.pth")
 
             # Save Generator checkpoint
-            save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler)
+            save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler_g)
             # Save Discriminator checkpoint
-            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler)
+            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler_d)
 
             # Save small weight model
             if save_weight_models:

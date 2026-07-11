@@ -554,8 +554,6 @@ def run_train_script(
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
-    use_lora: bool = False,
-    lora_rank: int = 16,
     use_best_step: bool = False,
     double_d_updates: bool = False,
 ):
@@ -617,8 +615,6 @@ def run_train_script(
                 use_custom_lr,
                 custom_lr_g,
                 custom_lr_d,
-                use_lora,
-                lora_rank,
                 use_best_step,
                 double_d_updates
             ],
@@ -2262,19 +2258,6 @@ def parse_arguments():
         default=0,
     )
     train_parser.add_argument(
-        "--use_lora",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help="Enables LoRA low-rank adaptation for efficient fine-tuning. Reduces overfitting on small datasets.",
-        default=False,
-    )
-    train_parser.add_argument(
-        "--lora_rank",
-        type=int,
-        help="Rank of the LoRA decomposition. Higher = more capacity but more overfitting risk. Recommended: 8-32.",
-        default=16,
-    )
-    train_parser.add_argument(
         "--use_custom_lr",
         type=lambda x: bool(strtobool(x)),
         choices=[True, False],
@@ -2629,8 +2612,6 @@ def main():
                 use_custom_lr=args.use_custom_lr,
                 custom_lr_g=args.custom_lr_g,
                 custom_lr_d=args.custom_lr_d,
-                use_lora=args.use_lora,
-                lora_rank=args.lora_rank,
             )
         elif args.mode == "index":
             run_index_script(
