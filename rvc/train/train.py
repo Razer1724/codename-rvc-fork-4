@@ -67,6 +67,9 @@ from utils import (
     early_stopper
 )
 from losses import (
+    discriminator_loss,
+    generator_loss,
+    feature_loss,
     kl_loss,
     kl_loss_fb,
     phase_loss,
@@ -125,7 +128,6 @@ use_2_sample_kl = bool(strtobool(sys.argv[39]))
 use_best_step = bool(strtobool(sys.argv[40]))
 double_d_updates = bool(strtobool(sys.argv[41]))
 
-save_g_steps = 100  # 0 = disabled; set to N to save G checkpoint every N steps (e.g. 100)
 
 
 # Parse command line arguments end region ===========================
@@ -157,6 +159,7 @@ global_step = 0
 warmup_completed = False
 from_scratch = False
 use_lr_scheduler_g = lr_scheduler_g != "none"
+use_lr_scheduler_d = lr_scheduler_d != "none"
 
 # Globals ( tweakable~ )
 enable_persistent_workers = True
@@ -203,6 +206,35 @@ dec_resblocks_lr_scale = None # 0.1
 
 import logging
 logging.getLogger("torch").setLevel(logging.ERROR)
+
+
+class NullDiscriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._dummy = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+        b = y.shape[0]
+        grad_anchor = self._dummy * 0
+        ones = torch.ones(b, device=y.device)  + grad_anchor
+        zeros = torch.zeros(b, device=y.device) + grad_anchor
+        fake_fmap = [grad_anchor.expand(b)]
+        return [ones], [zeros], fake_fmap, fake_fmap
+
+def univhd_project_gamma(net_d, vocoder, rank, global_step):
+    if vocoder != "APEX-GAN":
+        return
+    disc = net_d.module if hasattr(net_d, "module") else net_d
+    gamma_val = None
+    with torch.no_grad():
+        for d in disc.discriminators:
+            if hasattr(d, "harmonic_filter"):
+                # Clamp the value
+                d.harmonic_filter.gamma.clamp_(min=1.0)
+                # Store it for printing
+                gamma_val = d.harmonic_filter.gamma.item()
+    if rank == 0 and global_step % 100 == 0 and gamma_val is not None:
+        print(f"[UnivHD] gamma: {gamma_val:.6f}")
 
 class EarlyStopSignalHandler:
     def __init__(self):
@@ -264,7 +296,7 @@ def endless_loader(loader):
         for batch in loader:
             yield batch
 
-def prepare_dataloaders(config, n_gpus, rank, batch_size):
+def prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=False):
     from data_utils import (
         DistributedBucketSampler,
         TextAudioCollateMultiNSFsid,
@@ -294,7 +326,28 @@ def prepare_dataloaders(config, n_gpus, rank, batch_size):
     )
     train_loader_safety(train_loader)
 
-    return train_loader
+    extra_d_loader = None
+    if build_extra_d_loader:
+        extra_d_sampler = DistributedBucketSampler(
+            train_dataset,
+            batch_size * n_gpus,
+            [50, 100, 200, 300, 400, 500, 600, 700, 800, 900],
+            num_replicas=n_gpus,
+            rank=rank,
+            shuffle=True
+        )
+        extra_d_loader = DataLoader(
+            train_dataset,
+            num_workers=2,
+            shuffle=False,
+            pin_memory=True,
+            collate_fn=collate_fn,
+            batch_sampler=extra_d_sampler,
+            persistent_workers=enable_persistent_workers,
+            prefetch_factor=4
+        )
+
+    return train_loader, extra_d_loader
 
 def get_g_model(config, sample_rate, vocoder, use_checkpointing):
     from rvc.lib.algorithm.synthesizers import Synthesizer
@@ -308,6 +361,83 @@ def get_g_model(config, sample_rate, vocoder, use_checkpointing):
         checkpointing = use_checkpointing,
         use_2_sample_kl = use_2_sample_kl,
     )
+
+def get_d_model(config, vocoder, use_checkpointing):
+    if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
+        # MPD + MSD + MRD ( unified ) - RingFormer architecture v1 and v2
+        return MPD_MSD_MRD_Combined(
+            config.model.use_spectral_norm,
+            use_checkpointing=use_checkpointing,
+            **dict(config.mrd)
+        )
+    elif vocoder == "APEX-GAN":
+        from rvc.lib.algorithm.discriminators.multi import MPD_SBD_MRD_Combined
+        # MPD + SBD + MRD ( unified )
+        return MPD_SBD_MRD_Combined(
+            config.train.segment_size,
+            config.model.use_spectral_norm,
+            use_checkpointing=use_checkpointing,
+            **dict(config.mrd)
+        )
+        '''
+        CoMBD + SBD + UnivHD + GLD - TRIALS
+        An experimental ensemble of mine which ( in theory ) is supposed to cover all required domains
+        [ Supposedly stable but effectiveness and actual stability of UnivHD + GLD is still uncertain. ]
+        '''
+        # from rvc.lib.algorithm.discriminators.multi import HolisticMultiDomainDiscriminator
+        # return HolisticMultiDomainDiscriminator(
+            # sample_rate=config.data.sample_rate,
+            # segment_size_samples=config.train.segment_size,
+            # use_spectral_norm=config.model.use_spectral_norm,
+        # )
+
+        '''
+        CoMBD + SBD + UnivHD - TRIALS
+        [ Supposedly stable but effectiveness and actual stability of UnivHD is still uncertain. ]
+        '''
+        # from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_UnivHD_Combined
+        # # CoMBD + SBD + UnivHD ( unified )
+        # return CoMBD_SBD_UnivHD_Combined(
+            # sample_rate=config.data.sample_rate,
+            # segment_size_samples=config.train.segment_size,
+            # use_spectral_norm=config.model.use_spectral_norm,
+        # )
+
+
+        '''
+        Dummy discriminator - only for debugging / isolated generator tests
+        '''
+        # return NullDiscriminator()
+
+
+        '''
+        CoMBD + SBD + MRD preset; Heavy, cannot test it reliably on 12 gig card.
+        '''
+        # from rvc.lib.algorithm.discriminators.multi import CoMBD_SBD_MRD_Combined
+        # return CoMBD_SBD_MRD_Combined(
+            # sample_rate=config.data.sample_rate,
+            # segment_size_samples=config.train.segment_size,
+            # use_spectral_norm=config.model.use_spectral_norm,
+            # **dict(config.mrd)
+        # )
+
+
+    elif vocoder == "RefineGAN":
+        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_MRD_Combined
+        # MPD + MSD + MRD ( unified )
+        return MPD_MSD_MRD_Combined(
+            config.model.use_spectral_norm,
+            use_checkpointing=use_checkpointing,
+            **dict(config.mrd)
+        )
+    else: # For NSF HiFi-GAN
+        from rvc.lib.algorithm.discriminators.multi import MPD_MSD_Combined
+        # MPD + MSD ( unified ) - Original RVC Setup
+        return MPD_MSD_Combined(
+            config.model.use_spectral_norm,
+            use_checkpointing=use_checkpointing
+        )
 
 
 def _make_optimizer(model, choice, lr, num_epochs=None, num_batches=None, param_groups=None):
@@ -399,21 +529,26 @@ def build_decoder_param_groups(net_g, base_lr):
 
 def get_optimizers(
     net_g,
+    net_d,
     config,
     optimizer_choice_g,
+    optimizer_choice_d,
     custom_lr_g,
+    custom_lr_d,
     use_custom_lr,
     total_epoch_count,
     train_loader
 ):
     lr_g = custom_lr_g if use_custom_lr else config.train.learning_rate_g
+    lr_d = custom_lr_d if use_custom_lr else config.train.learning_rate_d
     num_batches = len(train_loader)
 
     g_param_groups = build_decoder_param_groups(net_g, lr_g)
 
     optim_g = _make_optimizer(net_g, optimizer_choice_g, lr_g, num_epochs=total_epoch_count, num_batches=num_batches, param_groups=g_param_groups)
+    optim_d = _make_optimizer(net_d, optimizer_choice_d, lr_d, num_epochs=total_epoch_count, num_batches=num_batches)
 
-    return optim_g
+    return optim_g, optim_d
 
 
 def apply_decoder_freezes(net_g, rank):
@@ -451,18 +586,21 @@ def apply_decoder_freezes(net_g, rank):
             print("[INIT] Decoder: no layers frozen")
 
 
-def setup_models_for_training(net_g, device, device_id, n_gpus):
+def setup_models_for_training(net_g, net_d, device, device_id, n_gpus):
     net_g = net_g.to(device_id) if device.type == "cuda" else net_g.to(device)
+    net_d = net_d.to(device_id) if device.type == "cuda" else net_d.to(device)
 
     if n_gpus > 1 and device.type == "cuda":
         net_g = DDP(net_g, device_ids=[device_id]) # find_unused_parameters=True)
+        net_d = DDP(net_d, device_ids=[device_id]) # find_unused_parameters=True)
 
-    return net_g
+    return net_g, net_d
 
 
-def load_model_and_optimizer(config, pretrainG, vocoder, use_checkpointing, sample_rate, optimizer_choice_g, custom_lr_g, use_custom_lr, total_epoch_count, train_loader, device, device_id, n_gpus, rank):
+def load_models_and_optimizers(config, pretrainG, pretrainD, vocoder, use_checkpointing, sample_rate, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader, device, device_id, n_gpus, rank):
     # Init the models
     net_g = get_g_model(config, sample_rate, vocoder, use_checkpointing)
+    net_d = get_d_model(config, vocoder, use_checkpointing)
     try:
         print("    ██████  Starting the training ...")
 
@@ -483,20 +621,24 @@ def load_model_and_optimizer(config, pretrainG, vocoder, use_checkpointing, samp
         if g_checkpoint_path and d_checkpoint_path:
 
             # Move the models to an appropriate device ( And optionally wrap with DDP for multi-gpu )
-            net_g = setup_models_for_training(net_g, device, device_id, n_gpus)
+            net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
 
             # Apply decoder / vocoder layer freezes ( for fine-tuning )
             apply_decoder_freezes(net_g, rank)
 
             # Init the optimizers
-            optim_g = get_optimizers(net_g, config, optimizer_choice_g, custom_lr_g, use_custom_lr, total_epoch_count, train_loader)
+            optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
 
             # Load the model and optim states
             _, _, _, epoch_str, gradscaler_dict_g = load_checkpoint(g_checkpoint_path, net_g, optim_g, strict_load)
+            _, _, _, epoch_str, gradscaler_dict_d = load_checkpoint(d_checkpoint_path, net_d, optim_d, strict_load)
 
             if override_pretrain_lr:
                 new_lr_for_pretrain = new_pretrain_lr
                 for param_group in optim_g.param_groups:
+                    param_group['lr'] = new_lr_for_pretrain
+                    param_group['initial_lr'] = new_lr_for_pretrain
+                for param_group in optim_d.param_groups:
                     param_group['lr'] = new_lr_for_pretrain
                     param_group['initial_lr'] = new_lr_for_pretrain
                 print(f"[OVERRIDE] Pretrain LR Override: {new_lr_for_pretrain}")
@@ -516,6 +658,7 @@ def load_model_and_optimizer(config, pretrainG, vocoder, use_checkpointing, samp
         epoch_str = 1
         global_step = 0
         gradscaler_dict_g = {}
+        gradscaler_dict_d = {}
 
         # Loading the pretrained Generator model
         if pretrainG not in ["", "None"]:
@@ -543,26 +686,35 @@ def load_model_and_optimizer(config, pretrainG, vocoder, use_checkpointing, samp
                 if rank == 0:
                     print(f"███ [SID SWAP] Swap successful. Model is ready for fine-tuning.")
 
+        # Loading the pretrained Discriminator model
+        if pretrainD not in ["", "None"]:
+            if rank == 0:
+                print(f"[ ] Loading pretrained (D) '{pretrainD}'")
+            checkpoint = torch.load(pretrainD, map_location="cpu", weights_only=True)
+            state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
+
+            net_d.load_state_dict(state_dict, strict=True)
 
         # Load the models and optionally wrap with DDP
-        net_g = setup_models_for_training(net_g, device, device_id, n_gpus)
+        net_g, net_d = setup_models_for_training(net_g, net_d, device, device_id, n_gpus)
 
         # Apply decoder / vocoder layer freezes ( for fine-tuning )
         apply_decoder_freezes(net_g, rank)
 
         # Init the optimizers
-        optim_g = get_optimizers(net_g, config, optimizer_choice_g, custom_lr_g, use_custom_lr, total_epoch_count, train_loader)
+        optim_g, optim_d = get_optimizers(net_g, net_d, config, optimizer_choice_g, optimizer_choice_d, custom_lr_g, custom_lr_d, use_custom_lr, total_epoch_count, train_loader)
 
-    return net_g, optim_g, epoch_str, global_step, gradscaler_dict_g
+    return net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict_g, gradscaler_dict_d
 
 
 def prepare_schedulers(
-    optim_g, use_warmup, warmup_duration,
+    optim_g, optim_d, use_warmup, warmup_duration,
     use_lr_scheduler_g, lr_scheduler_g, exp_decay_gamma_g,
+    use_lr_scheduler_d, lr_scheduler_d, exp_decay_gamma_d,
     total_epoch_count, epoch_str, global_step, train_loader
 ):
-    warmup_scheduler_g = None
-    scheduler_g = None
+    warmup_scheduler_g, warmup_scheduler_d = None, None
+    scheduler_g, scheduler_d = None, None
 
     num_batches_per_epoch = len(train_loader)
 
@@ -577,9 +729,15 @@ def prepare_schedulers(
         warmup_scheduler_g = torch.optim.lr_scheduler.LambdaLR(
             optim_g, lr_lambda=lambda epoch: min(1.0, (epoch + 1) / warmup_duration)
         )
+        warmup_scheduler_d = torch.optim.lr_scheduler.LambdaLR(
+            optim_d, lr_lambda=lambda epoch: min(1.0, (epoch + 1) / warmup_duration)
+        )
 
     if not use_warmup:
         for param_group in optim_g.param_groups:
+            if 'initial_lr' not in param_group:
+                param_group['initial_lr'] = param_group['lr']
+        for param_group in optim_d.param_groups:
             if 'initial_lr' not in param_group:
                 param_group['initial_lr'] = param_group['lr']
 
@@ -598,7 +756,22 @@ def prepare_schedulers(
                 optim_g, T_max=total_epoch_count, eta_min=3e-5, last_epoch=scheduler_resume_epoch
             )
 
-    return warmup_scheduler_g, scheduler_g
+    if use_lr_scheduler_d:
+        if lr_scheduler_d == "exp decay epoch":
+            scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
+                optim_d, gamma=exp_decay_gamma_d, last_epoch=scheduler_resume_epoch
+            )
+        elif lr_scheduler_d == "exp decay step":
+            exp_decay_gamma_d_step = exp_decay_gamma_d ** (1.0 / num_batches_per_epoch)
+            scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
+                optim_d, gamma=exp_decay_gamma_d_step, last_epoch=scheduler_resume_step
+            )
+        elif lr_scheduler_d == "cosine annealing epoch":
+            scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optim_d, T_max=total_epoch_count, eta_min=3e-5, last_epoch=scheduler_resume_epoch
+            )
+
+    return warmup_scheduler_g, warmup_scheduler_d, scheduler_g, scheduler_d
 
 
 def get_reference_sample(train_loader, device, config):
@@ -701,6 +874,7 @@ def main():
                     n_gpus,
                     experiment_dir,
                     pretrainG,
+                    pretrainD,
                     total_epoch_count,
                     epoch_save_frequency,
                     save_weight_models,
@@ -726,6 +900,7 @@ def run(
     n_gpus,
     experiment_dir,
     pretrainG,
+    pretrainD,
     total_epoch_count,
     epoch_save_frequency,
     save_weight_models,
@@ -742,6 +917,7 @@ def run(
         n_gpus (int): The total number of GPUs available for training.
         experiment_dir (str): The directory where experiment logs and checkpoints will be saved.
         pretrainG (str): Path to the pre-trained generator model.
+        pretrainD (str): Path to the pre-trained discriminator model.
         total_epoch_count (int): The total number of epochs for training.
         epoch_save_frequency (int): Frequency of saving epochs.
         save_weight_models (int): Whether to save small weight models. 0 for no, 1 for yes.
@@ -749,7 +925,7 @@ def run(
         config (object): Configuration object containing training parameters.
         device (torch.device): The device to use for training (CPU or GPU).
     """
-    global global_step, warmup_completed, optimizer_choice_g, from_scratch
+    global global_step, warmup_completed, optimizer_choice_g, optimizer_choice_d, from_scratch
 
     stopper = EarlyStopSignalHandler()
 
@@ -763,8 +939,11 @@ def run(
         use_warmup,
         config,
         optimizer_choice_g,
+        optimizer_choice_d,
         lr_scheduler_g,
         exp_decay_gamma_g,
+        lr_scheduler_d,
+        exp_decay_gamma_d,
         use_kl_annealing,
         kl_annealing_cycle_duration,
         spectral_loss,
@@ -774,7 +953,7 @@ def run(
     setup_env_and_distr(rank, n_gpus, device, device_id, config)
 
     # Dataloading and loaders preparation
-    train_loader = prepare_dataloaders(config, n_gpus, rank, batch_size)
+    train_loader, extra_d_loader = prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=double_d_updates)
 
     # Spk dim verif
     spk_dim = verify_spk_dim(config, model_info_path, experiment_dir, latest_checkpoint_path, rank, pretrainG)
@@ -795,15 +974,18 @@ def run(
         sys.exit(1)
 
 
-    # Loading of model and optim
-    net_g, optim_g, epoch_str, global_step, gradscaler_dict_g = load_model_and_optimizer(
+    # Loading of models and optims
+    net_g, net_d, optim_g, optim_d, epoch_str, global_step, gradscaler_dict_g, gradscaler_dict_d = load_models_and_optimizers(
         config,
         pretrainG,
+        pretrainD,
         vocoder,
         use_checkpointing,
         sample_rate,
         optimizer_choice_g,
+        optimizer_choice_d,
         custom_lr_g,
+        custom_lr_d,
         use_custom_lr, 
         total_epoch_count,
         train_loader,
@@ -828,19 +1010,23 @@ def run(
             print(f"[INIT] TensorBoard writer initialized.")
 
     # from-scratch checker ( disables average loss )
-    if pretrainG in ["", "None"] or force_from_scratch:
+    if (pretrainG in ["", "None"] or pretrainD in ["", "None"]) or force_from_scratch:
         from_scratch = True
         if rank == 0:
             print("[INIT] No pretrains used: Average loss disabled!")
 
     # Prepare the schedulers
-    warmup_scheduler_g, scheduler_g = prepare_schedulers(
+    warmup_scheduler_g, warmup_scheduler_d, scheduler_g, scheduler_d = prepare_schedulers(
         optim_g,
+        optim_d,
         use_warmup,
         warmup_duration,
         use_lr_scheduler_g, 
         lr_scheduler_g,
         exp_decay_gamma_g,
+        use_lr_scheduler_d,
+        lr_scheduler_d,
+        exp_decay_gamma_d,
         total_epoch_count,
         epoch_str,
         global_step,
@@ -852,12 +1038,14 @@ def run(
 
     # GradScaler for FP16 training
     gradscaler_g = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
+    gradscaler_d = torch.amp.GradScaler(enabled=(device.type == "cuda" and train_dtype == torch.float16))
 
-    if len(gradscaler_dict_g) > 0:
+    if len(gradscaler_dict_g) > 0 and len(gradscaler_dict_d) > 0:
         gradscaler_g.load_state_dict(gradscaler_dict_g)
-        print("[INIT] Loading G gradscaler state dicts")
+        gradscaler_d.load_state_dict(gradscaler_dict_d)
+        print("[INIT] Loading G/D gradscaler state dicts")
     else:
-        print("[INIT] G gradscaler state dict not found - Fresh initialization")
+        print("[INIT] G/D gradscaler state dicts not found - Fresh initialization")
 
     # Reference sample for live-infer
     reference = get_reference_sample(train_loader, device, config)
@@ -866,13 +1054,15 @@ def run(
     cache = []
 
     for epoch in range(epoch_str, total_epoch_count + 1):
+        if extra_d_loader is not None:
+            extra_d_loader.batch_sampler.set_epoch(epoch)
         should_stop = training_loop(
             rank,
             epoch,
             config,
-            net_g,
-            optim_g,
-            scheduler_g,
+            [net_g, net_d],
+            [optim_g, optim_d],
+            [scheduler_g, scheduler_d],
             train_loader,
             [writer_eval],
             cache,
@@ -886,37 +1076,52 @@ def run(
             fn_spectral_loss,
             n_gpus,
             gradscaler_g,
+            gradscaler_d,
             fn_spectral_loss2,
             hann_window,
             stopper=stopper,
+            extra_d_loader=extra_d_loader,
         )
 
         if use_warmup and epoch <= warmup_duration:
             if warmup_scheduler_g:
                 warmup_scheduler_g.step()
+            if warmup_scheduler_d:
+                warmup_scheduler_d.step()
 
             # Logging of finished warmup
             if epoch == warmup_duration:
                 warmup_completed = True
                 print(f"    ██████  Warmup completed at epochs: {warmup_duration}")
                 print(f"    ██████  LR G: {optim_g.param_groups[0]['lr']}")
+                print(f"    ██████  LR D: {optim_d.param_groups[0]['lr']}")
 
                 if lr_scheduler_g == "exp decay epoch":
                     print(f"    ██████  Starting (G) per-epoch exponential lr decay with gamma of {exp_decay_gamma_g}")
                 elif lr_scheduler_g == "cosine annealing epoch":
                     print("    ██████  Starting (G) per-epoch cosine annealing scheduler " )
 
+                if lr_scheduler_d == "exp decay epoch":
+                    print(f"    ██████  Starting (D) per-epoch exponential lr decay with gamma of {exp_decay_gamma_d}")
+                elif lr_scheduler_d == "cosine annealing epoch":
+                    print("    ██████  Starting (D) per-epoch cosine annealing scheduler " )
+
+
 
         if use_lr_scheduler_g and (not use_warmup or warmup_completed):
             if lr_scheduler_g in ["exp decay epoch", "cosine annealing epoch"]:
                 scheduler_g.step()
 
+        if use_lr_scheduler_d and (not use_warmup or warmup_completed):
+            if lr_scheduler_d in ["exp decay epoch", "cosine annealing epoch"]:
+                scheduler_d.step()
+
 def training_loop(
     rank,
     epoch,
     config,
-    net,
-    optim,
+    nets,
+    optims,
     schedulers,
     train_loader,
     writers,
@@ -931,9 +1136,11 @@ def training_loop(
     fn_spectral_loss,
     n_gpus,
     gradscaler_g,
+    gradscaler_d,
     fn_spectral_loss2=None,
     hann_window=None,
     stopper=None,
+    extra_d_loader=None
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -942,8 +1149,8 @@ def training_loop(
         rank (int): Rank of the current process.
         epoch (int): Current epoch number.
         config (object): Configuration object containing training parameters.
-        net: generator model net_g
-        optim: optimizer optim_g
+        nets (list): List of models [net_g, net_d].
+        optims (list): List of optimizers [optim_g, net_d].
         train_loader: training dataloader.
         writers (list): List of TensorBoard writers [writer_eval].
         cache (list): List to cache data in GPU memory.
@@ -956,16 +1163,19 @@ def training_loop(
         fn_spectral_loss: spectral loss;  can be l1, multi-scale or ms-stft.
         fn_spectral_loss2: 2nd spectral loss
         gradscaler_g: gradscaler for fp16 - Used for Generator
+        gradscaler_d: gradscaler for fp16 - Used for Discriminator
         hann_window: hann window used for RingFormer
     """
-    global global_step, warmup_completed, use_lr_scheduler_g, lr_scheduler_g, use_warmup, use_best_step
+    global global_step, warmup_completed, use_lr_scheduler_g, lr_scheduler_g, use_lr_scheduler_d, lr_scheduler_d, use_warmup, use_best_step
 
-    net_g = net
-    optim_g = optim
-    scheduler_g = schedulers if schedulers is not None else None
+    net_g, net_d = nets
+    optim_g, optim_d = optims
+    scheduler_g, scheduler_d = schedulers if schedulers is not None else (None, None)
 
     train_loader = train_loader if train_loader is not None else None
     train_loader.batch_sampler.set_epoch(epoch)
+
+    extra_d_train_loader = endless_loader(extra_d_loader) if extra_d_loader is not None else None
 
     if writers is not None:
         writer = writers[0]
@@ -981,9 +1191,12 @@ def training_loop(
         live_sd_g = None
 
     net_g.train()
+    net_d.train()
 
     if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
         optim_g.train()
+    if optimizer_choice_d in ("Sched-Free AdamW", "Sched-Free RAdam"):
+        optim_d.train()
 
     # Partial resume aligning
     current_epoch_start_step = (epoch - 1) * len(train_loader)
@@ -1001,16 +1214,23 @@ def training_loop(
     if not from_scratch:
         # Tensors init for averaged losses:
         if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-            tensor_count = 3
+            tensor_count = 9
         else:
-            tensor_count = 2
+            tensor_count = 8
         epoch_loss_tensor = torch.zeros(tensor_count, device=device)
         num_batches_in_epoch = 0
 
     avg_rolling_cache = {
+        "grad_norm_d": deque(maxlen=rolling_loss_steps),
+        "grad_norm_g": deque(maxlen=rolling_loss_steps),
+        "loss_disc": deque(maxlen=rolling_loss_steps),
+        "loss_disc_real": deque(maxlen=rolling_loss_steps),
+        "loss_disc_fake": deque(maxlen=rolling_loss_steps),
+        "loss_adv": deque(maxlen=rolling_loss_steps),
+        "loss_gen_total": deque(maxlen=rolling_loss_steps),
+        "loss_fm": deque(maxlen=rolling_loss_steps),
         "loss_spectral": deque(maxlen=rolling_loss_steps),
         "loss_kl": deque(maxlen=rolling_loss_steps),
-        "grad_norm_g": deque(maxlen=rolling_loss_steps),
     }
     if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
         avg_rolling_cache["loss_sd"] = deque(maxlen=rolling_loss_steps)
@@ -1051,9 +1271,29 @@ def training_loop(
             elif device.type != "cuda":
                 info = [tensor.to(device) for tensor in info]
 
+            if double_d_updates:
+                info_extra = next(extra_d_train_loader)
+                # Device handling
+                if device.type == "cuda":
+                    info_extra = [t.cuda(device_id, non_blocking=True) for t in info_extra]
+                elif device.type != "cuda":
+                    info_extra = [t.to(device) for t in info_extra]
+
 
             # Batch unpacking ( Main )
             (phone, phone_lengths, pitch, pitchf, spec, spec_lengths, y, y_lengths, sid) = info
+
+            # Extra batch unpacking ( Used for additional disc update )
+            if double_d_updates:
+                (phone_ex, phone_lengths_ex, pitch_ex, pitchf_ex, spec_ex, spec_lengths_ex, y_ex, y_lengths_ex, sid_ex) = info_extra
+
+
+            # Generator extra forward pass:
+            if double_d_updates:
+                with torch.no_grad(), autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
+                    model_output_ex = net_g(phone_ex, phone_lengths_ex, pitch_ex, pitchf_ex, spec_ex, spec_lengths_ex, sid_ex)
+                    y_hat_ex, ids_slice_ex, *_ = model_output_ex
+                y_ex_sliced = commons.slice_segments(y_ex, ids_slice_ex * config.data.hop_length, config.train.segment_size, dim=3)
 
 
             # Generator main forward pass:
@@ -1087,6 +1327,51 @@ def training_loop(
                 loss_sd = (loss_magnitude + loss_phase) * 0.7
 
 
+            # Discriminator updates (independent batches when double)
+            d_updates = [(y, y_hat.detach())]
+            if double_d_updates:
+                d_updates.insert(0, (y_ex_sliced, y_hat_ex.detach()))
+
+            _loss_disc_acc, _loss_disc_real_acc, _loss_disc_fake_acc, _grad_norm_d_acc = [], [], [], []
+
+            for y_d_real, y_d_fake in d_updates:
+                with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
+                    y_d_hat_r, y_d_hat_g, _, _ = net_d(y_d_real, y_d_fake)
+
+                with autocast(device_type="cuda", enabled=False):
+                    loss_disc, loss_disc_real, loss_disc_fake = discriminator_loss(y_d_hat_r, y_d_hat_g)
+
+                optim_d.zero_grad(set_to_none=True)
+                if train_dtype == torch.float16:
+                    gradscaler_d.scale(loss_disc).backward()
+                    gradscaler_d.unscale_(optim_d)
+                    scale_d = gradscaler_d.get_scale()
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d)
+                    gradscaler_d.step(optim_d)
+                    gradscaler_d.update()
+                    skip_lr_sched_d = (scale_d > gradscaler_d.get_scale())
+                else:
+                    loss_disc.backward()
+                    grad_norm_d = torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=grad_clip_value_d)
+                    optim_d.step()
+                    skip_lr_sched_d = False
+
+                # Temp accumulation
+                _loss_disc_acc.append(loss_disc.detach())
+                _loss_disc_real_acc.append(loss_disc_real.detach())
+                _loss_disc_fake_acc.append(loss_disc_fake.detach())
+                _grad_norm_d_acc.append(grad_norm_d)
+
+            # Stack + mean
+            loss_disc = torch.stack(_loss_disc_acc).mean()
+            loss_disc_real = torch.stack(_loss_disc_real_acc).mean()
+            loss_disc_fake = torch.stack(_loss_disc_fake_acc).mean()
+            grad_norm_d = torch.stack(_grad_norm_d_acc).mean()
+
+
+            # Run discriminator on generated output
+            with autocast(device_type="cuda", enabled=use_amp, dtype=train_dtype):
+                _, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
 
 
             # Compute generator losses:
@@ -1109,6 +1394,11 @@ def training_loop(
                     # Loss
                     loss_spectral = loss_l1_mel + loss_ms_stft
 
+                # Feature Matching loss
+                loss_fm = feature_loss(fmap_r, fmap_g) * 2.0
+
+                # Generator loss
+                loss_adv = generator_loss(y_d_hat_g)
 
                 # Kl annealing handler
                 if use_kl_annealing:
@@ -1121,7 +1411,6 @@ def training_loop(
                 loss_kl = kl_loss_fb(z_p, logs_q, m_p, logs_p, z_mask, z_p2, free_bits) * config.train.c_kl 
                 #loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl
 
-
                 # KL diagnostic: per-dim std (raw, without free_bits clamp)
                 with torch.no_grad():
                     if z_p2 is not None:
@@ -1133,6 +1422,7 @@ def training_loop(
                     kl_std_cache.append(raw_kl_per_dim.std().item())
                     last_kl_per_dim = raw_kl_per_dim.detach()
 
+
                 # RingFormer related
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                     loss_magnitude = torch.nn.functional.l1_loss(mag, target_magnitude)
@@ -1142,9 +1432,9 @@ def training_loop(
 
                 # Total generator loss
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                    loss_gen_total = loss_spectral + loss_kl * kl_beta + loss_sd
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta + loss_sd
                 else:
-                    loss_gen_total = loss_spectral + loss_kl * kl_beta
+                    loss_gen_total = loss_adv + loss_fm + loss_spectral + loss_kl * kl_beta
 
             # Generator backward and update:
             optim_g.zero_grad(set_to_none=True)
@@ -1165,7 +1455,7 @@ def training_loop(
 
             # Track best step in this epoch (FM + Spectral)
             if use_best_step:
-                loss_val = (loss_spectral).detach()
+                loss_val = loss_gen_total.detach() if from_scratch else (loss_fm + loss_spectral).detach()
                 if loss_val < best_loss_g:
                     best_loss_g = loss_val
                     model_g = net_g.module if hasattr(net_g, "module") else net_g
@@ -1177,29 +1467,50 @@ def training_loop(
                 if use_lr_scheduler_g and (not use_warmup or warmup_completed) and lr_scheduler_g == "exp decay step":
                     scheduler_g.step()
 
+            # Per step exp lr decay for discriminator
+            if not skip_lr_sched_d:
+                if use_lr_scheduler_d and (not use_warmup or warmup_completed) and lr_scheduler_d == "exp decay step":
+                    scheduler_d.step()
+
 
 
             if not from_scratch:
                 # Loss accumulation for epoch-avg
-                epoch_loss_tensor[0].add_(loss_spectral.detach())
-                epoch_loss_tensor[1].add_(loss_kl.detach())
+                epoch_loss_tensor[0].add_(loss_disc.detach())
+                epoch_loss_tensor[1].add_(loss_disc_real.detach())
+                epoch_loss_tensor[2].add_(loss_disc_fake.detach())
+                epoch_loss_tensor[3].add_(loss_adv.detach())
+                epoch_loss_tensor[4].add_(loss_gen_total.detach())
+                epoch_loss_tensor[5].add_(loss_fm.detach())
+                epoch_loss_tensor[6].add_(loss_spectral.detach())
+                epoch_loss_tensor[7].add_(loss_kl.detach())
 
                 if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                    epoch_loss_tensor[3].add_(loss_sd.detach())
+                    epoch_loss_tensor[8].add_(loss_sd.detach())
 
             # Loss accumulation for rolling-avg
-
-            # Losses:
-            avg_rolling_cache["loss_spectral"].append(loss_spectral.detach())
-            avg_rolling_cache["loss_kl"].append(loss_kl.detach())
-            if "loss_sd" in avg_rolling_cache:
-                avg_rolling_cache["loss_sd"].append(loss_sd.detach())
-
-            # Gradients:
+            # D Grads:
+            if torch.isfinite(grad_norm_d):
+                avg_rolling_cache["grad_norm_d"].append(grad_norm_d)
+            else:
+                writer.add_scalar("Grad_Norm_Diag/D_Skipped", 1, global_step)
+            # G Grads:
             if torch.isfinite(grad_norm_g):
                 avg_rolling_cache["grad_norm_g"].append(grad_norm_g)
             else:
                 writer.add_scalar("Grad_Norm_Diag/G_Skipped", 1, global_step)
+
+            # Losses:
+            avg_rolling_cache["loss_disc"].append(loss_disc.detach())
+            avg_rolling_cache["loss_disc_real"].append(loss_disc_real.detach())
+            avg_rolling_cache["loss_disc_fake"].append(loss_disc_fake.detach())
+            avg_rolling_cache["loss_adv"].append(loss_adv.detach()) 
+            avg_rolling_cache["loss_gen_total"].append(loss_gen_total.detach())
+            avg_rolling_cache["loss_fm"].append(loss_fm.detach())
+            avg_rolling_cache["loss_spectral"].append(loss_spectral.detach())
+            avg_rolling_cache["loss_kl"].append(loss_kl.detach())
+            if "loss_sd" in avg_rolling_cache:
+                avg_rolling_cache["loss_sd"].append(loss_sd.detach())
 
 
             if rank == 0 and global_step % rolling_loss_steps == 0:
@@ -1208,6 +1519,7 @@ def training_loop(
                 # Learning rate retrieval for rolling logging
                 if from_scratch:
                     scalar_dict_rolling.update({
+                        "learning_rate/lr_d": optim_d.param_groups[0]["lr"],
                         "learning_rate/lr_g": optim_g.param_groups[0]["lr"],
                     })
 
@@ -1229,7 +1541,6 @@ def training_loop(
                     diag_scalar = sum(kl_std_cache) / len(kl_std_cache)
                     summarize(writer=writer, global_step=global_step, scalars={"diag/kl_std": diag_scalar})
                     writer.add_histogram("diag/kl_per_dim_hist", last_kl_per_dim.cpu(), global_step)
-
                 flush_writer(writer, rank)
 
             if from_scratch and pretrain_preview and rank == 0 and global_step % pretrain_preview_interval == 0:
@@ -1251,19 +1562,10 @@ def training_loop(
 
             pbar.update(1)
 
-            # Step-based G checkpoint save
-            if save_g_steps > 0 and rank == 0 and global_step % save_g_steps == 0:
-                g_path = os.path.join(experiment_dir, f"G_{global_step}.pth")
-                if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
-                    optim_g.eval()
-                save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler_g)
-                if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
-                    optim_g.train()
-
             if early_stopper(
                 stopper, rank, global_step, epoch, architecture, 
-                net_g, optim_g, config, 
-                experiment_dir, gradscaler_g, save_weight_models,
+                [net_g, net_d], [optim_g, optim_d], config, 
+                experiment_dir, gradscaler_g, gradscaler_d, save_weight_models,
                 model_name, vocoder, n_gpus
             ):
                 return True
@@ -1298,6 +1600,7 @@ def training_loop(
         y_hat_mel = wave_to_mel(config, y_hat, half=train_dtype) # slice/mel_gen
 
         # Learning rate retrieval for avg-epoch variation:
+        lr_d = optim_d.param_groups[0]["lr"]
         lr_g = optim_g.param_groups[0]["lr"]
 
         # At each epoch completion
@@ -1308,12 +1611,19 @@ def training_loop(
 
             # metrics dict
             scalar_dict_avg = {
-            "loss_avg/loss_spectral": avg_epoch_loss[0].item(),
-            "loss_avg/loss_kl": avg_epoch_loss[1].item(),
+            "loss_avg/loss_disc": avg_epoch_loss[0].item(),
+            "loss_avg/loss_disc_real": avg_epoch_loss[1].item(),
+            "loss_avg/loss_disc_fake": avg_epoch_loss[2].item(),
+            "loss_avg/loss_adv": avg_epoch_loss[3].item(),
+            "loss_avg/loss_gen_total": avg_epoch_loss[4].item(),
+            "loss_avg/loss_fm": avg_epoch_loss[5].item(),
+            "loss_avg/loss_spectral": avg_epoch_loss[6].item(),
+            "loss_avg/loss_kl": avg_epoch_loss[7].item(),
+            "learning_rate/lr_d": lr_d,
             "learning_rate/lr_g": lr_g,
             }
             if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
-                scalar_dict_avg.update({"loss_avg/loss_sd": avg_epoch_loss[3].item()})
+                scalar_dict_avg.update({"loss_avg/loss_sd": avg_epoch_loss[8].item()})
 
             summarize(writer=writer, global_step=global_step, scalars=scalar_dict_avg)
             flush_writer(writer, rank)
@@ -1395,16 +1705,25 @@ def training_loop(
                     except:
                         pass
 
-            # Switch to eval mode for Schedule-Free optim before saving (uses averaged params)
+            # Switch to eval mode for Schedule-Free optims before saving (uses averaged params)
             if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
                 optim_g.eval()
+            if optimizer_choice_d in ("Sched-Free AdamW", "Sched-Free RAdam"):
+                optim_d.eval()
+
 
             # Save Generator checkpoint (live weights; averaging was restored above)
             save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler_g)
 
+            # Save Discriminator checkpoint
+            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler_d)
+
             # Switch back to train mode after saving
             if optimizer_choice_g in ("Sched-Free AdamW", "Sched-Free RAdam"):
                 optim_g.train()
+            if optimizer_choice_d in ("Sched-Free AdamW", "Sched-Free RAdam"):
+                optim_d.train()
+
 
             # Save small weight model
             if save_weight_models:
