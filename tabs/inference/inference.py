@@ -12,6 +12,7 @@ import zstandard as zstd
 from core import (
     run_infer_script,
     run_batch_infer_script,
+    import_voice_converter,
 )
 
 from rvc.lib.utils import format_title
@@ -425,11 +426,12 @@ def inference_tab():
             unload_button = gr.Button("Unload the voice model")
             refresh_button = gr.Button("Refresh models, indexes and audios")
 
+            def _unload_and_cleanup():
+                import_voice_converter().cleanup_model()
+                return {"value": "", "__type__": "update"}, {"value": "", "__type__": "update"}
+
             unload_button.click(
-                fn=lambda: (
-                    {"value": "", "__type__": "update"},
-                    {"value": "", "__type__": "update"},
-                ),
+                fn=_unload_and_cleanup,
                 inputs=[],
                 outputs=[model_file, index_file],
             )

@@ -487,17 +487,12 @@ class VoiceConverter:
         """
         Cleans up the model and releases resources.
         """
-        if self.hubert_model is not None:
-            del self.net_g, self.n_spk, self.vc, self.hubert_model, self.tgt_sr
-            self.hubert_model = self.net_g = self.n_spk = self.vc = self.tgt_sr = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        self.loaded_index = None
-        del self.net_g, self.cpt, self.active_cpt
+        import gc
+        for attr in ("net_g", "n_spk", "vc", "hubert_model", "tgt_sr", "cpt", "active_cpt", "loaded_model", "loaded_index"):
+            setattr(self, attr, None)
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        self.cpt = None
-        self.active_cpt = None
 
     def load_model(self, weight_root):
         """

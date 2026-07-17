@@ -333,8 +333,11 @@ def print_init_setup(
     use_warmup,
     config,
     optimizer_choice_g,
+    optimizer_choice_d,
     lr_scheduler_g,
     exp_decay_gamma_g,
+    lr_scheduler_d,
+    exp_decay_gamma_d,
     use_kl_annealing,
     kl_annealing_cycle_duration,
     spectral_loss,
@@ -366,6 +369,7 @@ def print_init_setup(
 
         # Optimizer check:
         print(f"    ██████  Optimizer (G): {optimizer_choice_g}")
+        print(f"    ██████  Optimizer (D): {optimizer_choice_d}")
 
         # Spectral loss check:
         if spectral_loss == "L1 Mel Loss":
@@ -387,6 +391,13 @@ def print_init_setup(
         else:
             print(f"    ██████  LR scheduler (G): Disabled")
 
+        if lr_scheduler_d != "none":
+            if lr_scheduler_d != "cosine annealing":
+                print(f"    ██████  LR scheduler (D): {lr_scheduler_d}, gamma: {exp_decay_gamma_d}")
+            else:
+                print(f"    ██████  LR scheduler (D): cosine annealing")
+        else:
+            print(f"    ██████  LR scheduler (D): Disabled")
 
         # Warmup
         if use_warmup:
@@ -446,19 +457,20 @@ def early_stopper(
     global_step, 
     epoch, 
     architecture, 
-    net, 
-    optim, 
+    nets, 
+    optims, 
     config, 
     experiment_dir, 
     gradscaler_g,
+    gradscaler_d,
     save_weight_models,
     model_name,
     vocoder,
     n_gpus
 ):
     if stopper is not None and stopper.stop_triggered:
-        net_g = net
-        optim_g = optim
+        net_g, net_d = nets
+        optim_g, optim_d = optims
 
         if rank == 0:
             print(f"[TRAINING] Saving the models at steps: '{global_step}' in progress ...")
@@ -468,6 +480,8 @@ def early_stopper(
 
             # Save Generator checkpoint
             save_checkpoint(net_g, optim_g, config.train.learning_rate_g, epoch, g_path, gradscaler_g)
+            # Save Discriminator checkpoint
+            save_checkpoint(net_d, optim_d, config.train.learning_rate_d, epoch, d_path, gradscaler_d)
 
             # Save small weight model
             if save_weight_models:

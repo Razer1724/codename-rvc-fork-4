@@ -8,7 +8,7 @@ import gradio as gr
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 
-from core import run_tts_script
+from core import run_tts_script, import_voice_converter
 from tabs.inference.inference import (
     change_choices,
     create_folder_and_move_files,
@@ -66,11 +66,12 @@ def tts_tab():
             unload_button = gr.Button("Unload Voice")
             refresh_button = gr.Button("Refresh")
 
+            def _unload_and_cleanup():
+                import_voice_converter().cleanup_model()
+                return {"value": "", "__type__": "update"}, {"value": "", "__type__": "update"}
+
             unload_button.click(
-                fn=lambda: (
-                    {"value": "", "__type__": "update"},
-                    {"value": "", "__type__": "update"},
-                ),
+                fn=_unload_and_cleanup,
                 inputs=[],
                 outputs=[model_file, index_file],
             )

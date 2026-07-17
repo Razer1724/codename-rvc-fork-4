@@ -272,7 +272,6 @@ class RefineGANGenerator(nn.Module):
 
     Args:
         sr (int, optional): Sampling rate of the audio. Defaults to 44100.
-        downsample_rates (tuple[int], optional): Downsampling rates for the downsampling blocks. Defaults to (2, 2, 8, 8).
         upsample_rates (tuple[int], optional): Upsampling rates for the upsampling blocks. Defaults to (8, 8, 2, 2).
         leaky_relu_slope (float, optional): Slope for the Leaky ReLU activation. Defaults to 0.2.
         num_mels (int, optional): Number of mel-frequency bins in the input mel-spectrogram. Defaults to 128.
@@ -285,7 +284,6 @@ class RefineGANGenerator(nn.Module):
         self,
         *,
         sr: int = 44100,
-        downsample_rates: tuple[int] = (2, 2, 8, 8),  # unused
         upsample_rates: tuple[int] = (8, 8, 2, 2),
         leaky_relu_slope: float = 0.2,
         num_mels: int = 128,

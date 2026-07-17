@@ -88,7 +88,7 @@ def envelope_loss(y, y_hat):
 
 
 
-def kl_loss_old(z_p, logs_q, m_p, logs_p, z_mask):
+def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     """
     Compute the Kullback-Leibler divergence loss.
 
@@ -107,20 +107,21 @@ def kl_loss_old(z_p, logs_q, m_p, logs_p, z_mask):
 
 
 
-def kl_loss(z_p, logs_q, m_p, logs_p, z_mask, z_p2=None, free_bits=0.0):
+def kl_loss_fb(z_p, logs_q, m_p, logs_p, z_mask, z_p2=None, free_bits=0.0):
     """
     Compute the Kullback-Leibler divergence loss.
     Supports 2-sample estimation when z_p2 is provided.
-    Free bits floor prevents posterior collapse.
+    Free bits floor prevents posterior collapse (per-dimension, Kingma et al. 2016).
 
     Args:
         z_p (torch.Tensor): Sampled latent variable transformed by the flow [b, h, t_t].
         logs_q (torch.Tensor): Log variance of the posterior distribution q [b, h, t_t].
         m_p (torch.Tensor): Mean of the prior distribution p [b, h, t_t].
         logs_p (torch.Tensor): Log variance of the prior distribution p [b, h, t_t].
-        z_mask (torch.Tensor): Mask for the latent variables [b, h, t_t].
-        z_p2 (torch.Tensor, optional): Second independent sample through flow (v3 only).
-        free_bits (float): Minimum KL value. 0.1 is default for v3 arch.
+        z_mask (torch.Tensor): Mask for the latent variables [b, 1, t_t] or [b, h, t_t].
+        z_p2 (torch.Tensor, optional): Second independent sample through flow.
+        free_bits (float): Total KL floor in nats (divided across dims internally).
+                           e.g. free_bits=1.0 with 192 dims -> 0.0052 nats/dim minimum.
     """
     def _term(zp):
         return logs_p - logs_q - 0.5 + 0.5 * ((zp - m_p) ** 2) * torch.exp(-2 * logs_p)
@@ -130,10 +131,24 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask, z_p2=None, free_bits=0.0):
     else:
         kl = _term(z_p)
 
-    kl = (kl * z_mask).sum()
-    loss = kl / z_mask.sum()
+    # kl: [b, h, t_t], z_mask: [b, 1, t_t] or [b, h, t_t]
+    kl = kl * z_mask
 
-    return loss.clamp(min=free_bits)
+    # Per-dim KL: sum over batch and time, average over valid elements per dim
+    # [b, h, t_t] -> [h]
+    n_dims = z_p.size(1)
+    kl_per_dim = kl.sum(dim=(0, 2))
+    mask_per_dim = z_mask.sum(dim=(0, 2)).clamp(min=1)
+    kl_per_dim = kl_per_dim / mask_per_dim
+
+    # Apply free bits floor (total floor divided across dims)
+    per_dim_floor = free_bits / n_dims
+    kl_per_dim = kl_per_dim.clamp(min=per_dim_floor)
+
+    # Sum over dims (matches old kl_loss scale: old divided by z_mask.sum()=b*t, not b*h*t)
+    loss = kl_per_dim.sum()
+
+    return loss
 
 
 class MultiScaleSTFTLoss(nn.Module):

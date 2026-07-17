@@ -17,7 +17,7 @@ from torch.nn.utils.parametrize import is_parametrized, remove_parametrizations
 import torch.nn.functional as F
 from torch.amp import autocast  # guard
 
-from rvc.lib.algorithm.generators.apex_gan_modules import PchipF0UpsamplerTorch, FusedDirichlet, FusedGeoSaw, Snake, snake_kaiming_normal_, snake_kaiming_uniform_
+from rvc.lib.algorithm.generators.apex_gan_modules import Snake, snake_kaiming_normal_, snake_kaiming_uniform_
 
 from rvc.lib.algorithm.generators.apex_gan_modules.stft import TorchSTFT
 
@@ -69,13 +69,81 @@ def create_resblock_conv1d_layer(channels, kernel_size, dilation, snake_init_var
 
 
 # ---------------------------------------------------------------------------
-# ResBlock  (unchanged from original)
+# Phase-only f0 controller
+# ---------------------------------------------------------------------------
+#
+# Physical motivation
+# --------------------
+# The excitation carries two structurally different kinds of information:
+#
+#   1. PERIODIC / voiced content (the fundamental sine derived from f0).
+#      This should act purely as a *phase reference* -- it tells the
+#      network WHERE in the cycle we are, not WHAT amplitude/shape the
+#      harmonics should have. Amplitude/shape must come from z.
+#
+#   2. APERIODIC / unvoiced content (breath, sibilants, UV noise).
+#      This is genuine broadband ENERGY that z realistically cannot
+#      cheaply reconstruct on its own, so it is legitimate to inject it
+#      additively, the same way the original implementation did.
+#
+# The bug being fixed here is that the old code injected BOTH as a single
+# combined, amplitude-carrying additive signal. Snake's own nonlinearity
+# (sin(alpha*x)^2) is exactly the kind of nonlinearity that can turn a
+# clean, high-amplitude sine into a full harmonic stack on its own,
+# without needing any information from z/x. That let f0 alone "explain"
+# voiced harmonic content, starving z of gradient.
+#
+# The fix: split the excitation into (a) a phase-only control signal for
+# the periodic part, injected directly into Snake's argument via the
+# angle-sum identity sin(a*x + beta) = sin(a*x)cos(beta) + cos(a*x)sin(beta),
+# and (b) a magnitude-only energy signal for the noise part, injected
+# additively as before. (cos_beta, sin_beta) is explicitly re-normalized
+# to unit norm every time it's produced, which is what structurally
+# prevents this pathway from smuggling amplitude back in -- it can only
+# ever encode a rotation.
+
+class PhaseProjector(nn.Module):
+    """
+    Projects a phase-only spectral reference (STFT phase of the PURE
+    voiced sine excitation -- magnitude discarded before this ever sees it)
+    down to a per-stage (cos_beta, sin_beta) pair, strided to match that
+    stage's temporal resolution.
+
+    Output is unit-normalized, so this module can only ever encode a
+    rotation. It has no channel through which to smuggle amplitude/energy
+    into the Snake activations it conditions.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int):
+        super().__init__()
+        stride = max(int(stride), 1)
+        kernel_size = stride * 2 if stride > 1 else 1
+        padding = (stride + 1) // 2 if stride > 1 else 0
+        self.proj = nn.Conv1d(
+            in_channels, out_channels * 2,
+            kernel_size=kernel_size, stride=stride, padding=padding,
+        )
+
+    def forward(self, sine_phase: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        out = self.proj(sine_phase)
+        cos_raw, sin_raw = out.chunk(2, dim=1)
+        norm = torch.sqrt(cos_raw * cos_raw + sin_raw * sin_raw + 1e-6)
+        return cos_raw / norm, sin_raw / norm
+
+
+# ---------------------------------------------------------------------------
+# ResBlock  (extended: optional phase-only beta into the first Snake per layer)
 # ---------------------------------------------------------------------------
 
 class ResBlock(nn.Module):
     """
     A residual block module that applies a series of 1D convolutional layers
     with residual connections.
+
+    `beta`, if provided, is a (cos_beta, sin_beta) unit-norm pair that
+    phase-shifts the FIRST Snake activation in each layer (s1). The second
+    Snake (s2) is left phase-free deliberately, to keep the f0-control
+    surface area minimal and easy to isolate/ablate.
     """
     def __init__(
         self,
@@ -101,11 +169,11 @@ class ResBlock(nn.Module):
             for d in dilations
         ])
 
-    def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None, beta=None):
         for conv1, conv2, s1, s2 in zip(self.convs1, self.convs2, self.snakes1, self.snakes2):
             x_residual = x
 
-            xt = s1(x)
+            xt = s1(x, beta=beta)
             xt = apply_mask(xt, x_mask)
             xt = conv1(xt)
 
@@ -127,228 +195,130 @@ class ResBlock(nn.Module):
 # Excitation synthesizer
 # ---------------------------------------------------------------------------
 
-def pcph_generator(
-    f0: torch.Tensor,
-    hop_length: int,
-    sample_rate: int,
-    random_init_phase: bool = False,
-    power_factor: float = 0.1,
-    epsilon: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Pseudo-Constant-Power Harmonics (PCPH) excitation signal generator.
-    Returns (signal [B,1,T_audio], f0_upsampled [B,1,T_audio]).
-    """
-    batch, _, frames = f0.size()
-    device = f0.device
-
-    if torch.all(f0 == 0.0):
-        zeros = torch.zeros((batch, 1, frames * hop_length), device=device)
-        return zeros, zeros
-
-    upsampler = PchipF0UpsamplerTorch(scale_factor=hop_length).to(device)
-    f0_upsampled = upsampler(f0)
-
-    voiced_mask = (f0_upsampled > 1.0).float()
-
-    phase_increment_f64 = f0_upsampled.double() / sample_rate
-    if random_init_phase:
-        init_phase = torch.rand((1, 1), device=device, dtype=torch.float64)
-        phase_increment_f64[:, :, :1] += init_phase
-
-    # Phase for FusedDirichlet: cumulative cycles in [0, 1), unwrapped then remainder
-    phase_cycles_f64 = torch.cumsum(phase_increment_f64, dim=2)
-    phase_cycles_f64 = torch.remainder(phase_cycles_f64, 1.0).float()
-
-    # Dynamic harmonic count: max harmonics below Nyquist at each sample
-    safe_f0 = torch.clamp(f0_upsampled, min=1.0)
-    N = torch.floor(sample_rate / (2.0 * safe_f0))
-
-    # Fused kernel for PCPH (Dirichlet sines sum)
-    harmonics = FusedDirichlet.apply(phase_cycles_f64, N, epsilon)
-
-    # Normalization: pseudo-constant power across varying harmonic count
-    amp_scale = power_factor * torch.sqrt(2.0 / torch.clamp(N, min=1.0))
-    signal = harmonics * amp_scale * voiced_mask
-
-    return signal, f0_upsampled
-
-
-def fgss_generator(
-    f0: torch.Tensor,
-    hop_length: int,
-    sample_rate: int,
-    random_init_phase: bool = False,
-    power_factor: float = 0.1,
-    geosaw_r: float = 0.90,
-    epsilon: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    batch, _, frames = f0.size()
-    device = f0.device
-
-    if torch.all(f0 == 0.0):
-        zeros = torch.zeros((batch, 1, frames * hop_length), device=device)
-        return zeros, zeros
-
-    upsampler = PchipF0UpsamplerTorch(scale_factor=hop_length).to(device)
-    f0_upsampled = upsampler(f0)
-
-    voiced_mask = (f0_upsampled > 1.0).float()
-
-    phase_increment_f64 = f0_upsampled.double() / sample_rate
-    if random_init_phase:
-        init_phase = torch.rand((1, 1), device=device, dtype=torch.float64)
-        phase_increment_f64[:, :, :1] += init_phase
-
-    # Cumulative phase in cycles [0,1)
-    phase_cycles_f64 = torch.cumsum(phase_increment_f64, dim=2)
-    phase_cycles_f64 = torch.remainder(phase_cycles_f64, 1.0).float()
-
-    # Radians calculation
-    phase_rad = phase_cycles_f64 * (2.0 * math.pi)
-
-    # Dynamic harmonic count
-    safe_f0 = torch.clamp(f0_upsampled, min=1.0)
-    N = torch.floor(sample_rate / (2.0 * safe_f0))
-
-    # GeoSaw kernel
-    harmonics = FusedGeoSaw.apply(phase_rad, N, geosaw_r, epsilon)
-
-    # Fixed normalization
-    signal = harmonics * (power_factor / 1.46) * voiced_mask
-
-    return signal, f0_upsampled
-
-
-class ExcitationSynthesizer_OLD(nn.Module):
-    """
-    Synthesizes the excitation source from F0:
-
-    - Voiced:   Pseudo-Constant-Power Harmonics (PCPH) via fused Dirichlet kernel.
-                Natively band-limited up to Nyquist to prevent aliasing.
-
-    - Unvoiced: Adaptive Gaussian noise.
-                Provides a stochastic foundation for sibilance and breath synthesis.
-    """
+class SineGenerator(torch.nn.Module):
     def __init__(
         self,
-        sample_rate: int,
-        hop_length: int = 480,
-        random_init_phase: bool = False,
-        power_factor: float = 0.1,
-        add_noise_std: float = 0.003,
-        geosaw_r: float = 0.90,
+        sampling_rate: int,
+        sine_amplitude: float = 0.1,
     ):
         super().__init__()
-        self.sample_rate = sample_rate
-        self.hop_length = hop_length
-        self.random_init_phase = random_init_phase
-        self.power_factor = power_factor
-        self.noise_std = add_noise_std
-        self.geosaw_r = geosaw_r
 
-    def forward(self, f0, upsample_factor=None):
-        hop = upsample_factor if upsample_factor is not None else self.hop_length
+        self.sampling_rate = sampling_rate
+        self.sine_amplitude = sine_amplitude
 
-        with autocast('cuda', enabled=False):
-            f0 = f0.float()
+    def _compute_voiced_unvoiced(self, f0: torch.Tensor):
+        return (f0 > 0.0).float()
 
-            with torch.no_grad():
-                harmonic_signal, f0_upsampled = fgss_generator(
-                    f0,
-                    hop_length=hop,
-                    sample_rate=self.sample_rate,
-                    random_init_phase=self.random_init_phase,
-                    power_factor=self.power_factor,
-                    geosaw_r=self.geosaw_r,
-                )
+    def _generate_sine_wave(
+        self,
+        f0: torch.Tensor,
+        upsampling_factor: int,
+    ):
+        batch_size, length, _ = f0.shape
 
-            voiced_mask = (f0_upsampled > 1.0).float()
-            noise_amp = voiced_mask * self.noise_std + (1.0 - voiced_mask) * (self.power_factor / 3.0)
-            noise = torch.randn_like(harmonic_signal) * noise_amp
-            excitation_signal = harmonic_signal + noise
-            excitation_signal = excitation_signal.to(dtype=f0.dtype)
+        upsampling_grid = torch.arange(
+            1, upsampling_factor + 1, dtype=f0.dtype, device=f0.device,
+        )
 
-        return excitation_signal  # (B, 1, T_audio)
+        phase = (f0 / self.sampling_rate) * upsampling_grid
+
+        # accumulate in fp32 for numerical stability
+        phase_remainder = (torch.fmod(phase[:, :-1, -1:].float() + 0.5, 1.0) - 0.5)
+        cumulative_phase = (phase_remainder.cumsum(dim=1).fmod(1.0).to(f0.dtype))
+
+        phase += torch.nn.functional.pad(cumulative_phase, (0, 0, 1, 0))
+        phase = phase.reshape(batch_size, -1, 1)
+        phase.remainder_(1.0)
+        phase.mul_(2 * math.pi)
+
+        torch.sin(phase, out=phase)
+
+        return phase
+
+    def forward(
+        self,
+        f0: torch.Tensor,
+        upsampling_factor: int,
+    ):
+        with torch.no_grad():
+
+            f0 = f0.unsqueeze(-1)
+
+            sine = self._generate_sine_wave(f0, upsampling_factor)
+            sine.mul_(self.sine_amplitude)
+
+            # Voiced mask: nearest-neighbor upsample from (B, T, 1) to (B, T*factor, 1)
+            # f0 is already either >0 (voiced) or 0 (unvoiced) per frame, so no
+            # interpolation of values is needed — just repeat each frame hop_length times.
+            voiced_mask_lo = (f0 > 0.0).float()                   # (B, T, 1)
+            voiced = voiced_mask_lo.transpose(2, 1)               # (B, 1, T)
+            voiced = F.interpolate(voiced, scale_factor=upsampling_factor, mode='nearest')
+            voiced = voiced.transpose(2, 1)                        # (B, T*factor, 1)
+
+            sine.mul_(voiced)
+
+        return sine, voiced
 
 
 class ExcitationSynthesizer(nn.Module):
     """
     Synthesizes the excitation source from F0.
 
-    - Voiced:   GeoSaw harmonic signal (band-limited sawtooth).
-    - Unvoiced: Learnable-shaped stochastic noise.
-                A small FIR filter learns the spectral color of fricatives
-                and breath, giving the network a richer prior than white noise.
+    Returns TWO tensors:
+
+      sine_only: (B, 1, T_audio)  pure voiced sine, zero noise. This is
+                 STFT'd upstream and only its PHASE is used -- magnitude is
+                 discarded, so it cannot carry an exploitable amplitude cheat.
+      noise_only:(B, 1, T_audio)  pure noise (voiced: tiny residual noise
+                 floor; unvoiced: full aperiodic energy for breath/UV/
+                 sibilants). STFT'd upstream and decomposed into real+imag
+                 parts which scale with signal amplitude AND decorrelate
+                 across frames to prevent vertical-line artifacts.
     """
     def __init__(
         self,
         sample_rate: int,
         hop_length: int = 480,
-        random_init_phase: bool = False,
-        power_factor: float = 0.1,
+        sine_amp: float = 0.1,
         add_noise_std: float = 0.003,
-        geosaw_r: float = 0.90,
-        noise_shaper_duration_ms: float = 0.65,
     ):
         super().__init__()
         self.sample_rate = sample_rate
         self.hop_length = hop_length
-        self.random_init_phase = random_init_phase
-        self.power_factor = power_factor
-        self.noise_std = add_noise_std
-        self.geosaw_r = geosaw_r
+        self.sine_amp = sine_amp
+        self.add_noise_std = add_noise_std
 
-        # Learnable noise shaper: 1-channel FIR filter that shapes white noise
-        # into something closer to speech-like fricative/breath spectra.
-        kernel_size = int(sample_rate * noise_shaper_duration_ms / 1000.0)
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        self.noise_shaper = nn.Conv1d(
-            1, 1, kernel_size,
-            padding=kernel_size // 2,
-            bias=False,
-        )
-        # near-identity init (delta-like) so training starts from white noise
-        with torch.no_grad():
-            self.noise_shaper.weight.zero_()
-            self.noise_shaper.weight[:, :, kernel_size // 2] = 1.0
+        self.sine_gen = SineGenerator(sample_rate, sine_amp)
+
+        self.l_linear = nn.Linear(1, 1)
+        self.l_tanh = nn.Tanh()
 
     def forward(self, f0, upsample_factor=None):
         hop = upsample_factor if upsample_factor is not None else self.hop_length
 
         with autocast('cuda', enabled=False):
             f0 = f0.float()
+            # fundamental harmonic, 1 sine -- PURE, no noise mixed in yet
+            harmonic_signal, voiced_mask = self.sine_gen(f0, hop)
 
-            with torch.no_grad():
-                harmonic_signal, f0_upsampled = fgss_generator(
-                    f0,
-                    hop_length=hop,
-                    sample_rate=self.sample_rate,
-                    random_init_phase=self.random_init_phase,
-                    power_factor=self.power_factor,
-                    geosaw_r=self.geosaw_r,
-                )
+            # White noise. Voiced: tiny residual (breath-under-voice).
+            # Unvoiced: full-strength aperiodic energy (UV / breath / sibilants).
+            noise_amp = voiced_mask * self.add_noise_std + (1.0 - voiced_mask) * (self.sine_amp / 3.0)
+            noise = noise_amp * torch.randn_like(harmonic_signal)
 
-            voiced_mask = (f0_upsampled > 1.0).float()
+            # Combined signal kept only for optional external diagnostics.
+            #combined = harmonic_signal + noise
+            #combined = self.l_tanh(self.l_linear(combined))
+            #combined = combined.to(dtype=f0.dtype)
 
-            # Base noise: white Gaussian
-            raw_noise = torch.randn_like(harmonic_signal)
+            sine_only = harmonic_signal.to(dtype=f0.dtype)
+            noise_only = noise.to(dtype=f0.dtype)
 
-            # Shape the noise: the filter learns spectral color for unvoiced sounds
-            # (e.g., high-shelf for sibilants, pink-ish for breath).
-            # Voiced regions get near-unshaped noise (very low amplitude anyway).
-            shaped_noise = self.noise_shaper(raw_noise)
-
-            # Amplitude envelope: voiced gets subtle breath, unvoiced gets louder hiss
-            noise_amp = voiced_mask * self.noise_std + (1.0 - voiced_mask) * (self.power_factor / 3.0)
-            noise = shaped_noise * noise_amp
-
-            excitation_signal = harmonic_signal + noise
-            excitation_signal = excitation_signal.to(dtype=f0.dtype)
-
-        return excitation_signal  # (B, 1, T_audio)
+        return (
+            #combined.transpose(1, 2),     # (B, 1, T_audio) -- diagnostics only
+            sine_only.transpose(1, 2),    # (B, 1, T_audio) -- phase source
+            noise_only.transpose(1, 2),   # (B, 1, T_audio) -- energy source
+        )
 
 
 class APEX_GAN_Generator(nn.Module):
@@ -358,13 +328,23 @@ class APEX_GAN_Generator(nn.Module):
     APEX stands for:
         A  — Adaptive harmonics  ( N scales with F0 to stay below Nyquist )
         P  — Pyramid injection   ( Each generator stage receives a strided
-                                   version of the PCPH harmonic spectrum )
+                                   version of the harmonic spectrum )
         EX — Complex excitation  ( iSTFT-ready spectral output )
+
+    F0 control is injected at EVERY upsampling stage as a PHASE-ONLY signal
+    (via PhaseProjector -> phase-conditioned Snake), so it can steer WHERE
+    harmonics land but cannot by itself supply the amplitude/shape that
+    becomes the reconstructed harmonic content -- that has to come from x
+    (i.e. from z, through conv_pre / cond / the resblock convs).
+
+    Aperiodic energy (breath / UV / sibilants) is still injected additively
+    at every stage via noise_convs, same as before -- that part of the
+    excitation is genuine energy z realistically can't invent, so there is
+    no reason to bottleneck it.
 
     Returns
     -------
-    spec  : (B, gen_istft_n_fft // 2 + 1, T_stft)   log-magnitude via exp()
-    phase : (B, gen_istft_n_fft // 2 + 1, T_stft)   wrapped phase via sin()
+    audio : (B, 1, T_audio)  reconstructed waveform via iSTFT
     """
 
     def __init__(
@@ -395,18 +375,14 @@ class APEX_GAN_Generator(nn.Module):
         self.full_hop = self.total_ups_factor * gen_istft_hop_size
 
         # ------------------------------------------------------------------
-        # Excitation synthesizer  (PCPH, replaces hn-nsf / SineGen)
+        # Excitation synthesizer
         # ------------------------------------------------------------------
         self.excitation_synthesizer = ExcitationSynthesizer(
             sample_rate=sr,
-            hop_length=self.full_hop,       # upsample f0 to full audio length
-            random_init_phase=False,
-            power_factor=0.1,
+            hop_length=self.full_hop,
+            sine_amp=0.1,
             add_noise_std=0.003,
-            geosaw_r=0.90,
-            noise_shaper_duration_ms=0.65,
         )
-
 
         # ------------------------------------------------------------------
         # Pre-conv
@@ -414,15 +390,17 @@ class APEX_GAN_Generator(nn.Module):
         self.conv_pre = weight_norm(Conv1d(initial_channel, upsample_initial_channel, 7, 1, padding=3))
 
         # ------------------------------------------------------------------
-        # Upsampler stages, per-stage spectral injection, main resblocks
+        # Upsampler stages, per-stage injection (energy + phase), main resblocks
         # ------------------------------------------------------------------
         self.ups = nn.ModuleList()
-        self.noise_convs = nn.ModuleList()   # spectral excitation injectors
-        self.noise_res = nn.ModuleList()     # refinement resblocks for injected exc
+        self.noise_convs = nn.ModuleList()   # aperiodic ENERGY injection (real amplitude, legitimate)
+        self.phase_convs = nn.ModuleList()   # periodic PHASE-ONLY injection (no amplitude, f0 control)
         self.resblocks = nn.ModuleList()
 
-        # har has gen_istft_n_fft+2 channels (spec + phase concatenated)
-        har_channels = gen_istft_n_fft + 2
+        # STFT of the excitation signals produces (n_fft//2 + 1) magnitude/phase bins.
+        stft_bins = gen_istft_n_fft // 2 + 1
+        # noise_convs take real+imaginary concatenated (= n_fft+2 channels)
+        noise_channels = gen_istft_n_fft + 2
 
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             in_ch  = upsample_initial_channel // (2 ** i)
@@ -433,22 +411,31 @@ class APEX_GAN_Generator(nn.Module):
                 ConvTranspose1d(in_ch, out_ch, k, u, padding=(k - u) // 2)
             ))
 
-            # Spectral excitation injection:
+            # Stride needed to bring the excitation's STFT-frame resolution
+            # down to this stage's resolution.
             if i + 1 < self.num_upsamples:
                 stride_f0 = math.prod(upsample_rates[i + 1:])
+            else:
+                # Last stage: excitation and x are already at the same resolution.
+                stride_f0 = 1
+
+            # Aperiodic energy injector (breath / UV / sibilants) -- additive, real amplitude.
+            # Takes [noise_mag, noise_phase * envelope] (n_fft+2 channels).
+            # Phase channels carry per-frame decorrelation AND amplitude envelope,
+            # preventing coherent comb patterns while preserving V/UV ratio.
+            if stride_f0 > 1:
                 self.noise_convs.append(Conv1d(
-                    har_channels, out_ch,
+                    noise_channels, out_ch,
                     kernel_size=stride_f0 * 2,
                     stride=stride_f0,
                     padding=(stride_f0 + 1) // 2,
+                    bias=False,
                 ))
-                # Mid-stage injection: use a 7-kernel resblock (same as HiFTNet)
-                self.noise_res.append(ResBlock(out_ch, kernel_size=7, dilations=(1, 3, 5)))
             else:
-                # Last stage: har and x are already at the same resolution
-                self.noise_convs.append(Conv1d(har_channels, out_ch, kernel_size=1))
-                # Final injection: use an 11-kernel resblock (same as HiFTNet)
-                self.noise_res.append(ResBlock(out_ch, kernel_size=11, dilations=(1, 3, 5)))
+                self.noise_convs.append(Conv1d(noise_channels, out_ch, kernel_size=1, bias=False))
+
+            # Periodic phase-only f0 controller -- feeds Snake's argument, not x.
+            self.phase_convs.append(PhaseProjector(stft_bins, out_ch, stride_f0))
 
             # Main resblocks
             for kk, d in zip(resblock_kernel_sizes, resblock_dilation_sizes):
@@ -490,62 +477,86 @@ class APEX_GAN_Generator(nn.Module):
         x: torch.Tensor,                    # (B, initial_channel, T_frames)
         f0: torch.Tensor,                   # (B, T_frames) or (B, 1, T_frames)
         g: Optional[torch.Tensor] = None,   # (B, gin_channels, 1)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Returns
         -------
-        spec  : (B, gen_istft_n_fft // 2 + 1, T_stft)
-        phase : (B, gen_istft_n_fft // 2 + 1, T_stft)
-
-        The caller is responsible for iSTFT reconstruction.
+        audio : (B, 1, T_audio)
         """
-        # ---- Prepare frame-level f0 → (B, 1, T_frames) ------------------
-        if f0.dim() == 2:
-            f0 = f0.unsqueeze(1)    # (B, 1, T_frames)
 
+        # ---- Generate excitation, split into phase-only / energy-only parts ----
+        sine_only, noise_only = self.excitation_synthesizer(f0)
 
-        # ---- Generate PCPH excitation waveform ---------------------------
-        excitation = self.excitation_synthesizer(f0)
-        # excitation: (B, 1, T_audio)
+        # Pure voiced sine -> STFT -> keep PHASE, discard magnitude
+        # normalize the sine to unit peak amplitude before STFT
+        peak = sine_only.abs().amax(dim=-1, keepdim=True)  # (B, 1, 1)
+        sine_unit = sine_only / (peak + 1e-8)
+        _, sine_phase = self.stft.transform(sine_unit.squeeze(1).float())
+        sine_phase = sine_phase.to(x.dtype)
 
-        # ---- STFT of excitation → spectral representation ----------------
-        har_spec, har_phase = self.stft.transform(excitation.squeeze(1).float())
+        # Pure noise -> STFT -> mag + phase.
+        # phase channels carry per-frame incoherence (prevents comb artifacts)
+        # but raw phase has constant RMS ~1.81 regardless of signal amplitude,
+        # which destroys the V/UV amplitude ratio and lets the conv learn a
+        # coherent comb filter.
+        # Fix: pre-scale phase by the noise magnitude envelope so the conv
+        # sees both decorrelation AND amplitude structure from the start.
+        # This prevents the comb (input amplitude varies frame-to-frame)
+        # while preserving the V/UV ratio (envelope carries it).
+        noise_mag, noise_phase = self.stft.transform(noise_only.squeeze(1).float())
+        noise_mag = noise_mag.to(x.dtype)
+        noise_phase = noise_phase.to(x.dtype)
 
-        har = torch.cat([har_spec, har_phase], dim=1)   # (B, n_fft+2, T_stft)
-        har = har.to(x.dtype)
+        # Per-frame amplitude envelope, normalized to unit mean.
+        # Computed once (not per-stage) since it's used by all noise_convs.
+        envelope = noise_mag.mean(dim=1, keepdim=True)              # (B, 1, T_stft)
+        envelope = envelope / (envelope.mean() + 1e-8)
+
+        # Bake the envelope into phase channels before the conv sees them.
+        # Phase still varies randomly frame-to-frame (decorrelation preserved),
+        # but its scale now tracks the actual noise amplitude (V/UV preserved).
+        har_noise = torch.cat([noise_mag, noise_phase * envelope], dim=1)  # (B, n_fft+2, T_stft)
 
         # ---- Pre-conv + speaker conditioning -----------------------------
         x = self.conv_pre(x)
         if g is not None:
             x = x + self.cond(g)
 
-        # ---- Upsample stages with spectral injection ---------------------
+        # ---- Upsample stages with dual injection --------------------------
         for i in range(self.num_upsamples):
-            #x = F.silu(x)
-            x = F.leaky_relu(x, negative_slope=0.1)
+            #x = F.leaky_relu(x, negative_slope=0.1)
+            x = F.silu(x, inplace=True)
             x = self.ups[i](x)
 
             # Reflection-pad before the last upsampler
             if i == self.num_upsamples - 1:
                 x = self.reflection_pad(x)
 
-            # Inject spectral excitation
-            x_source = self.noise_convs[i](har)         # strided to match x
-            x_source = self.noise_res[i](x_source)      # refine
-            x = x + x_source
+            # Real aperiodic energy injection (breath / UV / sibilants).
+            # The conv sees [mag, phase] for artifact prevention (phase channels
+            # break up coherent temporal patterns).
+            energy_source = self.noise_convs[i](har_noise)
+            x = x + energy_source
 
-            # Main multi-kernel resblocks
+            # Phase-only f0 control for this stage's Snake activations.
+            # cos_beta/sin_beta are unit-norm by construction (see
+            # PhaseProjector) -- they can only rotate Snake's argument,
+            # never add amplitude.
+            beta = self.phase_convs[i](sine_phase)
+
+            # Main multi-kernel resblocks, phase-conditioned
             xs = None
             for j in range(self.num_kernels):
+                rb_out = self.resblocks[i * self.num_kernels + j](x, beta=beta)
                 if xs is None:
-                    xs = self.resblocks[i * self.num_kernels + j](x)
+                    xs = rb_out
                 else:
-                    xs += self.resblocks[i * self.num_kernels + j](x)
+                    xs += rb_out
             x = xs / self.num_kernels
 
         # ---- Post-conv -------------------------
-        #x = F.silu(x)
-        x = F.leaky_relu(x, negative_slope=0.01)
+        #x = F.leaky_relu(x, negative_slope=0.01)
+        x = F.silu(x, inplace=True)
 
         x = self.conv_post(x)                           # (B, n_fft+2, T_stft)
 
@@ -572,16 +583,13 @@ class APEX_GAN_Generator(nn.Module):
             remove_weight_norm_legacy_safe(m)
         for m in self.resblocks:
             m.remove_weight_norm()
-        for m in self.noise_res:
-            m.remove_weight_norm()
-        # noise_convs are plain Conv1d (no weight_norm), nothing to strip
 
     def __prepare_scriptable__(self):
         _remove_wn_if_present(self.conv_pre)
         _remove_wn_if_present(self.conv_post)
         for m in self.ups:
             _remove_wn_if_present(m)
-        for rb in chain(self.resblocks, self.noise_res):
+        for rb in self.resblocks:
             for conv in chain(rb.convs1, rb.convs2):
                 _remove_wn_if_present(conv)
         return self

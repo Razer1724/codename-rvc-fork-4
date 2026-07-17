@@ -6,8 +6,6 @@ import torch.nn as nn
 from torch.nn import Conv2d
 from torch.nn.utils.parametrizations import weight_norm, spectral_norm
 
-from torchaudio.transforms import Spectrogram, Resample
-
 import typing
 from typing import Optional, List, Union, Dict, Tuple
 
@@ -16,16 +14,23 @@ from rvc.train.utils import AttrDict
 
 from rvc.lib.algorithm.commons import get_padding
 from rvc.lib.algorithm.residuals import LRELU_SLOPE
+from rvc.lib.algorithm.discriminators.multi.pqmf import PQMF
+from rvc.lib.algorithm.discriminators.multi.hmdd import (
+    SBDBlock,
+    _PQMF_SBD, _PQMF_FSBD,
+    _SBD_FILTERS, _SBD_STRIDES, _SBD_KERNEL_SIZES,
+    _SBD_DILATIONS, _SBD_BAND_RANGES, _SBD_TRANSPOSE,
+)
 
 LRELU_INPLACE = False
 
 class MPD_MSD_MRD_Combined(torch.nn.Module):
     """
     Class combining:
-    Multi-Period, Multi-Scale and Multi-Resolution Discriminators.
+    Multi-Period, Sub-Band and Multi-Resolution Discriminators.
     """
 
-    def __init__(self, use_spectral_norm: bool = False, use_checkpointing: bool = False, **multi_resolution_cfg):
+    def __init__(self, segment_size_samples: int, use_spectral_norm: bool = False, use_checkpointing: bool = False, **multi_resolution_cfg):
         super().__init__()
         self.mrd_cfg = multi_resolution_cfg
         self.use_checkpointing = use_checkpointing
@@ -40,13 +45,18 @@ class MPD_MSD_MRD_Combined(torch.nn.Module):
 
 
         self.discriminators = torch.nn.ModuleList(
-            [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
-            + [DiscriminatorP(p, use_spectral_norm=use_spectral_norm) for p in periods]
+            [DiscriminatorP(p, use_spectral_norm=use_spectral_norm) for p in periods]
             + [DiscriminatorR(self.mrd_cfg, resolution) for resolution in self.resolutions]
         )
+        self.sbd = SBD(segment_size_samples, use_spectral_norm=use_spectral_norm)
 
     def forward(self, y, y_hat):
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+
+        for (y_d_r, fmap_r), (y_d_g, fmap_g) in zip(self.sbd(y), self.sbd(y_hat)):
+            y_d_rs.append(y_d_r);  fmap_rs.append(fmap_r)
+            y_d_gs.append(y_d_g);  fmap_gs.append(fmap_g)
+
         for d in self.discriminators:
             if self.training and self.use_checkpointing:
                 y_d_r, fmap_r = checkpoint(d, y, use_reentrant=False)
@@ -62,41 +72,46 @@ class MPD_MSD_MRD_Combined(torch.nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
-class DiscriminatorS(torch.nn.Module):
+class SBD(torch.nn.Module):
     """
-    Discriminator for the short-term component.
-
-    This class implements a discriminator for the short-term component
-    of the audio signal. The discriminator is composed of a series of
-    convolutional layers that are applied to the input signal.
+    Sub-Band Discriminator — 1:1 with HMDD SBD.
+    Shared PQMF analysis, per-band SBDBlock, returns list of (logit, fmap) tuples.
     """
 
-    def __init__(self, use_spectral_norm: bool = False):
+    def __init__(self, segment_size_samples: int, use_spectral_norm: bool = False):
         super().__init__()
 
-        norm_f = spectral_norm if use_spectral_norm else weight_norm
-        self.convs = torch.nn.ModuleList(
-            [
-                norm_f(torch.nn.Conv1d(1, 16, 15, 1, padding=7)),
-                norm_f(torch.nn.Conv1d(16, 64, 41, 4, groups=4, padding=20)),
-                norm_f(torch.nn.Conv1d(64, 256, 41, 4, groups=16, padding=20)),
-                norm_f(torch.nn.Conv1d(256, 1024, 41, 4, groups=64, padding=20)),
-                norm_f(torch.nn.Conv1d(1024, 1024, 41, 4, groups=256, padding=20)),
-                norm_f(torch.nn.Conv1d(1024, 1024, 5, 1, padding=2)),
-            ]
-        )
-        self.conv_post = norm_f(torch.nn.Conv1d(1024, 1, 3, 1, padding=1))
-        self.lrelu = torch.nn.LeakyReLU(LRELU_SLOPE, inplace=LRELU_INPLACE)
+        self.pqmf   = PQMF(*_PQMF_SBD)
+        self.f_pqmf = PQMF(*_PQMF_FSBD)
+
+        self.band_ranges = _SBD_BAND_RANGES
+        self.transpose   = _SBD_TRANSPOSE
+
+        self.blocks = torch.nn.ModuleList()
+        for _f, _k, _d, _s, br, tr in zip(
+            _SBD_FILTERS, _SBD_KERNEL_SIZES,
+            _SBD_DILATIONS, _SBD_STRIDES,
+            _SBD_BAND_RANGES, _SBD_TRANSPOSE,
+        ):
+            segment_dim = (segment_size_samples // br[1]) - br[0] if tr else (br[1] - br[0])
+            self.blocks.append(SBDBlock(
+                segment_dim=segment_dim, filters=_f, kernel_size=_k,
+                dilations=_d, strides=_s, use_spectral_norm=use_spectral_norm,
+            ))
 
     def forward(self, x):
-        fmap = []
-        for conv in self.convs:
-            x = self.lrelu(conv(x))
-            fmap.append(x)
-        x = self.conv_post(x)
-        fmap.append(x)
-        x = torch.flatten(x, 1, -1)
-        return x, fmap
+        y_sub     = self.pqmf.analysis(x)
+        y_sub_f   = self.f_pqmf.analysis(x)
+
+        band_outputs = []
+        for d, br, tr in zip(self.blocks, self.band_ranges, self.transpose):
+            if tr:
+                _x = torch.transpose(y_sub_f[:, br[0]:br[1], :], 1, 2)
+            else:
+                _x = y_sub[:, br[0]:br[1], :]
+            out, fmap = d(_x)
+            band_outputs.append((torch.flatten(out, 1, -1), fmap))
+        return band_outputs
 
 
 class DiscriminatorP(torch.nn.Module):

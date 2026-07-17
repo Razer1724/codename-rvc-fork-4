@@ -66,7 +66,6 @@ class Synthesizer(torch.nn.Module):
         }
 
         dec_kwargs = {
-            "initial_channel": inter_channels,
             "resblock_kernel_sizes": resblock_kernel_sizes,
             "resblock_dilation_sizes": resblock_dilation_sizes,
             "upsample_rates": upsample_rates,
@@ -77,22 +76,24 @@ class Synthesizer(torch.nn.Module):
             "checkpointing": checkpointing,
         }
 
-        if not use_f0 and vocoder != "HiFi-GAN":
-            print(f"!!! Warning: {vocoder} does not support training without pitch guidance.")
-            self.dec = None
+        # RingFormer needs inverse stft params
+        if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+            dec_kwargs.update({"gen_istft_n_fft": gen_istft_n_fft, "gen_istft_hop_size": gen_istft_hop_size})
+
+        # RefineGan specific
+        if vocoder == "RefineGAN":
+            dec_kwargs.update({"num_mels": inter_channels})
         else:
-            GeneratorClass = vocoder_map.get(vocoder, generators.HiFiGANNSFGenerator)
+            dec_kwargs.update({"initial_channel": inter_channels})
 
-            if vocoder in ["RingFormer_v1", "RingFormer_v2"]: # RingFormer needs inverse stft params
-                dec_kwargs.update({"gen_istft_n_fft": gen_istft_n_fft, "gen_istft_hop_size": gen_istft_hop_size})
 
-            self.dec = GeneratorClass(**dec_kwargs)
+        GeneratorClass = vocoder_map.get(vocoder, generators.HiFiGANNSFGenerator)
+        self.dec = GeneratorClass(**dec_kwargs)
 
-            if use_f0 and vocoder == "HiFi-GAN":
-                print("    ██████  Vocoder: NSF-HiFi-GAN")
-            else:
-                print(f"    ██████  Vocoder: {vocoder}")
-
+        if use_f0 and vocoder == "HiFi-GAN":
+            print("    ██████  Vocoder: NSF-HiFi-GAN")
+        else:
+            print(f"    ██████  Vocoder: {vocoder}")
 
 
         # ------   [ TextEncoder ] Maps extracted features to latent space (p)   ----------------------------------------------------

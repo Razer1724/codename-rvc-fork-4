@@ -554,6 +554,7 @@ def run_train_script(
     use_custom_lr: bool = False,
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
+    use_2_sample_kl: bool = False,
     use_best_step: bool = False,
     double_d_updates: bool = False,
 ):
@@ -615,6 +616,7 @@ def run_train_script(
                 use_custom_lr,
                 custom_lr_g,
                 custom_lr_d,
+                use_2_sample_kl,
                 use_best_step,
                 double_d_updates
             ],
@@ -2169,7 +2171,7 @@ def parse_arguments():
     train_parser.add_argument(
         "--spectral_loss",
         type=str,
-        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1", "Hybrid MS"],
+        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1"],
         help="Available types of spectral loss functions. ",
         default="L1 Mel Loss",
     )

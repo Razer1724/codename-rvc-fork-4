@@ -787,7 +787,7 @@ def train_tab():
                     spectral_loss = gr.Radio(
                         label="Spectral loss",
                         info=SPECTRAL_LOSS_INFO,
-                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1", "Hybrid MS"],
+                        choices=["L1 Mel Loss", "Multi-Scale Mel Loss", "Hybrid L1"],
                         value="L1 Mel Loss",
                         interactive=True,
                         key='spectral_loss'
@@ -843,6 +843,13 @@ def train_tab():
                         interactive=True,
                         visible="hidden",
                         key='kl_annealing_cycle_duration'
+                    )
+                    use_2_sample_kl = gr.Checkbox(
+                        label="Use 2-sample KL",
+                        info="Uses 2 samples to calculate KL loss. Very experimental.",
+                        value=False,
+                        interactive=True,
+                        key='use_2_sample_kl'
                     )
                     use_best_step = gr.Checkbox(
                         label="Best in-epoch step",
@@ -1037,6 +1044,7 @@ def train_tab():
                     use_custom_lr,
                     custom_lr_g,
                     custom_lr_d,
+                    use_2_sample_kl,
                     use_best_step,
                     double_d_updates,
                 ],
@@ -1251,7 +1259,7 @@ def train_tab():
                 custom_lr_d, use_kl_annealing, kl_annealing_cycle_duration,
                 rolling_loss_steps, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
-                grad_clip_value_d_release, index_algorithm, use_best_step, double_d_updates
+                grad_clip_value_d_release, index_algorithm, use_2_sample_kl, use_best_step, double_d_updates
             ])
 
             def save_training_preset(inputs):
