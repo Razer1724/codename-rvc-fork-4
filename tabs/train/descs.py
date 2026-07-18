@@ -28,51 +28,58 @@ VOCODER_INFO = textwrap.dedent("""\
 """)
 
 
+
+
 DATASET_TRUNCATION_INFO = textwrap.dedent("""\
 <br/>
 
-### **SmartCutter / Truncated-Audio approach ( Most stable results ):**
+<span style="font-size: 25px; font-weight: bold;">1.  Codename;0's recommended approach:</span>
+- Set Normalization to: **post_rms**
+- Set Audio cutting to: **Simple**
 
-#### Requirements:
-- Your dataset is a **" fused dataset "** type ( Means, you concatenated / joined up all smaller samples / chunks into 1 continuous audio file )
-- A. "SmartCutter" enabled ( My machine-learning solution for silence-truncation. )
-- B. Dataset being **silence-truncated beforehand.**
-- Audio normalization method: **" post_rms "** or **" post_peak "** ~ Both will work fine but in rare cases, rms one will be better.
-- Audio cutting: " Simple "
-<br/> ⚠ ( If SmartCutter doesn't click with ur dataset, please go for option "B" ~ Audacity is great for that. )
+<span style="font-size: 14px; font-weight: bold;">Dataset requirements:</span>
+- **1 continuous / concatenated audio file** instead of many independent short segments/files.
+- Apply **silence truncation** ( keeping short silence gaps around **80–120 ms** is fine ).
+- Ensure your dataset isn't busted in terms of volume / dynamic range or peaks. ( What can help: Peak / RMS compression or "Leveler" if you have iZotope RX )
 
-<br/>
-
-### **Universal-ish approach:**
-
-#### Requirements:
-- "SmartCutter" disabled.
-- Dataset not too crazy with noisy or silent spaces / gaps ( Else perform a soft silence-truncation to get it somewhere reasonable. )
-- " post_rms " as audio normalization method.
-- Audio cutting: " Simple "
+<span style="font-size: 14px; font-weight: bold;">EXTRA INFO:</span>
+- **Audacity** is a great free tool for the first 2 things I mention above if you don't have another alternative.
+- For quick concatenation, drag and drop a folder containing multiple audio files onto **run_concat.bat** located in the **EXTRAS** folder (**found in the root directory of this fork**).
 
 <br/>
 
-### **Lazy / Low effort approach:**
+<span style="font-size: 25px; font-weight: bold;">2. Lazy / Low effort approach ( Not recommended.):</span>
+- Set Normalization to: **post_peak**
+- Set Audio cutting to: **Automatic**
+<br/> ⚠ ( Yet I'd still recommend to go with the 1st approach if you want training stability and more consistent results.
 
-- SmartCutter:  Set it to "Disabled"
-- Audio cutting:  " Automatic "
-<br/> ⚠ ( Yet I'd still recommend to go with approach the 1st or 2nd approach. They provide ***much better and more consistent*** results.
+<br/>
+
+<span style="font-size: 25px; font-weight: bold;">3. Experimental alternative approach:</span>
+- Enable "SmartCutter" by ticking the checkbox
+- Set Normalization to: **post_rms**
+- Set Audio cutting to: **Simple**
+
+<span style="font-size: 14px; font-weight: bold;">Requirements:</span>
+- **1 continuous / concatenated audio file** instead of many independent short segments/files.
+<br/> ⚠ ( **There is a chance** SmartCutter might not work well on your dataset.. In that case just go for one of the above approaches. )
+
+<span style="font-size: 14px; font-weight: bold;">EXTRA INFO:</span>
+- SmartCutter was made with base/pretrain model creation in mind.
+- The model is meant to detect silent/low-noise gaps that are +100ms long, replace them with digital-silence and trim to 100ms.
+- By design should respect zero-crossings and avoid cutting into breaths and organic sounds but might make mistakes.
 
 <br/>
 
 ` NOTES ` <br/>
-0. Remember, a really good dataset makes 50% of the model creation workflow. If you use awful datasets, don't expect miracle results.
-
-1. If your set has major peak / consistency issues, I recommend reading up on " Peak taming compression ".
-
+1. Remember.. Dataset is the very foundation of your model. If you use awful datasets, don't expect miraculous results.. AI is not a magical tool like that.
 2. Generally.. you shouldn't tweak these default settings unless you know you're doing it.
+""")
 
-3. The only exception ( sub-point 2 ) would be for " DC / high-pass filtering " and " Noise Reduction " ~ Read their description.
 
-4. If SmartCutter causes issues for your set ( cut words and so on. ), fallback to classical silence truncation.
-<br/> ( You can use Audacity for that. )
-
+PREPROCESS_RMS_VALUE_INFO = textwrap.dedent("""\
+Set your RMS target for 'post_rms' normalization mode. If your dataset isn't suitable for a given dBFS ( clipping occurs), **it'll get auto-adjusted automatically to whatever is safe**.
+If you want to squeeze out more volume out of your dataset without clipping, consider performing dynamic-range compression or peak-compression on your dataset beforehand.
 """)
 
 

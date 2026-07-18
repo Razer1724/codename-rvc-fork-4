@@ -359,9 +359,15 @@ class VoiceConverter:
             output_path_format = audio_output_path.replace(
                 ".wav", f".{export_format.lower()}"
             )
+            intermediate_wav = audio_output_path
             audio_output_path = self.convert_audio_format(
                 audio_output_path, output_path_format, export_format
             )
+            if export_format != "WAV" and os.path.exists(intermediate_wav):
+                try:
+                    os.remove(intermediate_wav)
+                except OSError:
+                    pass
 
             elapsed_time = time.time() - start_time
             print(

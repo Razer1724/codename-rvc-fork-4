@@ -400,8 +400,12 @@ def train_tab():
                         interactive=False,
                     )
 
+    # Dataset preprocessing information section
+    with gr.Accordion(" Dataset Preprocessing Guide / Preparation Tips ", open=False):
+        gr.Markdown(DATASET_TRUNCATION_INFO)
+
     # Preprocess section
-    with gr.Accordion("Preprocess"):
+    with gr.Accordion("Preprocessing"):
         dataset_path = gr.Dropdown(
             label="Dataset Path",
             info="Path to the dataset folder. ( Or you can use the dropbox to browse the folders. )",
@@ -413,7 +417,7 @@ def train_tab():
         refresh = gr.Button("Refresh")
 
         with gr.Accordion("Advanced Settings for the preprocessing step", open=True):
-            gr.Markdown(DATASET_TRUNCATION_INFO)
+            gr.Markdown()
             with gr.Row():
                 dataset_format = gr.Radio(
                     label="Dataset Format",
@@ -445,7 +449,7 @@ def train_tab():
                     label="Loudness Normalization",
                     info=NORMALIZATION_INFO,
                     choices=["none", "post_peak", "post_peak_rvc", "post_rms"],
-                    value="post_peak",
+                    value="post_rms",
                     interactive=True,
                     visible=True,
                     scale=0.6,
@@ -455,9 +459,9 @@ def train_tab():
                 rms_norm_db = gr.Slider(
                     -24.0, -3.0, -18.0, step=1.0,
                     label="RMS Target (dBFS)",
-                    info="Only used when 'post_rms' mode is selected above.",
+                    info=PREPROCESS_RMS_VALUE_INFO,
                     interactive=True,
-                    visible="hidden",
+                    visible=True,
                     key='rms_norm_db'
                 )
             with gr.Row():
@@ -552,7 +556,7 @@ def train_tab():
             )
 
     # Extract section
-    with gr.Accordion("Extract"):
+    with gr.Accordion("Extraction"):
         with gr.Row():
             f0_method = gr.Radio(
                 label="Pitch extraction algorithm",

@@ -183,7 +183,7 @@ def output_path_fn(input_audio_path):
         0
     ]
     new_name = original_name_without_extension + "_output.wav"
-    output_path = os.path.join(os.path.dirname(input_audio_path), new_name)
+    output_path = os.path.join(audio_root, new_name)
     return output_path
 
 
@@ -252,7 +252,7 @@ def save_to_wav(record_button):
         target_path = os.path.join(audio_root_relative, os.path.basename(new_name))
 
         shutil.move(path_to_file, target_path)
-        return target_path, output_path_fn(target_path)
+        return target_path, gr.update()
 
 
 def save_to_wav2(upload_audio):
@@ -264,7 +264,7 @@ def save_to_wav2(upload_audio):
         os.remove(target_path)
 
     shutil.copy(file_path, target_path)
-    return target_path, output_path_fn(target_path)
+    return target_path, gr.update()
 
 
 def delete_outputs():
@@ -506,15 +506,14 @@ def inference_tab():
                     "", # edited_f0_output cleared
                     gr.update(visible=False), # hide editor panel
                     {}, # clear cache state
-                    output_path_fn(audio_path), # keep output_path logic unchanged
+                    gr.update(),
                 )
-            # Same song or no cache -> just update the output path
             return (
                 cache.get("f0_json", ""),
                 "",
                 gr.update(visible=bool(cache.get("f0_json"))),
                 cache,
-                output_path_fn(audio_path),
+                gr.update(),
             )
 
         def enforce_terms_with_f0_editor(
@@ -544,6 +543,22 @@ def inference_tab():
                 message = "You must agree to the Terms of Use to proceed."
                 gr.Info(message)
                 return message, None
+
+            if not output_path or not output_path.strip():
+                output_path = output_path_fn(audio)
+            else:
+                if os.path.isdir(output_path):
+                    default_name = os.path.splitext(os.path.basename(output_path_fn(audio)))[0]
+                    output_path = os.path.join(output_path, default_name + f".{export_format.lower()}")
+
+                _, ext = os.path.splitext(output_path)
+                valid_formats = {"wav", "mp3", "flac", "ogg", "m4a"}
+                if ext and ext.lower().lstrip(".") in valid_formats:
+                    export_format = ext.lower().lstrip(".").upper()
+
+                    output_path = output_path[: -len(ext)] + ".wav"
+                elif not ext:
+                    output_path += ".wav"
 
             # Build f0_file from the editor if the user has edited the curve
             f0_file = None
@@ -684,13 +699,9 @@ def inference_tab():
                 clear_outputs_infer = gr.Button("Clear '_output' audio files ( infer outputs ) from 'assets/audios' ")
                 output_path = gr.Textbox(
                     label="Path for infer outputs",
-                    placeholder="Provide the path for inference outputs",
-                    info="The path where inference outputs will be saved. \nBy default they land in 'assets/audios' ",
-                    value=(
-                        output_path_fn(audio_paths[0])
-                        if audio_paths
-                        else os.path.join(now_dir, "assets", "audios", "output.wav")
-                    ),
+                    placeholder=os.path.join("assets", "audios", "filename_output.wav"),
+                    info="Leave empty to save in 'assets/audios' with default name. Paste a full path to override ( FileName with extension )",
+                    value="",
                     interactive=True,
                 )
                 export_format = gr.Radio(

@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import argparse
+import shutil
 
 import platform
 import subprocess
@@ -190,9 +191,19 @@ def run_infer_script(
     infer_pipeline.convert_audio(
         **kwargs,
     )
-    return f"File {input_path} inferred successfully.", output_path.replace(
-        ".wav", f".{export_format.lower()}"
-    )
+
+    export_path = output_path.replace(".wav", f".{export_format.lower()}")
+    if not os.path.exists(export_path):
+        export_path = output_path
+
+    try:
+        tmp_dir = os.path.join(os.environ.get("TEMP", os.path.join(now_dir, "temp")), "infer_preview")
+        os.makedirs(tmp_dir, exist_ok=True)
+        preview_path = os.path.join(tmp_dir, os.path.basename(export_path))
+        shutil.copy2(export_path, preview_path)
+        return f"File {input_path} inferred successfully. Saved to: {export_path}", preview_path
+    except Exception:
+        return f"File {input_path} inferred successfully. Saved to: {export_path}", export_path
 
 
 # Batch infer

@@ -72,5 +72,24 @@
         "use_spectral_norm": false,
         "gin_channels": 256,
         "spk_embed_dim": 109
+    },
+    "mrd": {
+        "resolutions": [
+            [
+                1024,
+                120,
+                600
+            ],
+            [
+                2048,
+                240,
+                1200
+            ],
+            [
+                512,
+                50,
+                240
+            ]
+        ]
     }
 }
