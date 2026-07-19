@@ -1,7 +1,8 @@
 {
     "train": {
         "seed": 1234,
-        "learning_rate": 0.0001,
+        "learning_rate_g": 0.0001,
+        "learning_rate_d": 0.0001,
         "betas": [
             0.8,
             0.99
@@ -15,11 +16,11 @@
     },
     "data": {
         "max_wav_value": 32768.0,
-        "sample_rate": 40000,
-        "filter_length": 2048,
-        "hop_length": 400,
-        "win_length": 2048,
-        "n_mel_channels": 125,
+        "sample_rate": 32000,
+        "filter_length": 1024,
+        "hop_length": 320,
+        "win_length": 1024,
+        "n_mel_channels": 80,
         "mel_fmin": 0.0,
         "mel_fmax": null
     },
@@ -57,13 +58,13 @@
         ],
         "upsample_rates": [
             10,
-            10,
+            8,
             2,
             2
         ],
         "upsample_initial_channel": 512,
         "upsample_kernel_sizes": [
-            16,
+            20,
             16,
             4,
             4
@@ -71,5 +72,24 @@
         "use_spectral_norm": false,
         "gin_channels": 256,
         "spk_embed_dim": 109
+    },
+    "mrd": {
+        "resolutions": [
+            [
+                1024,
+                120,
+                600
+            ],
+            [
+                2048,
+                240,
+                1200
+            ],
+            [
+                512,
+                50,
+                240
+            ]
+        ]
     }
 }

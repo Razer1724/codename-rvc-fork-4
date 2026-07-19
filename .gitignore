@@ -28,6 +28,7 @@ assets/f0editor_userdata/f0_presets/
 assets/f0editor_userdata/session/
 assets/datasets/
 assets/audios/audio-others/
+assets/training_presets/
 logs/
 rvc/models/pretraineds/
 rvc/models/pretraineds/hifi-gan

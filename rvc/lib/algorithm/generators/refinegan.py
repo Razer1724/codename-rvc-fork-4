@@ -271,8 +271,7 @@ class RefineGANGenerator(nn.Module):
     It can also incorporate global conditioning.
 
     Args:
-        sample_rate (int, optional): Sampling rate of the audio. Defaults to 44100.
-        downsample_rates (tuple[int], optional): Downsampling rates for the downsampling blocks. Defaults to (2, 2, 8, 8).
+        sr (int, optional): Sampling rate of the audio. Defaults to 44100.
         upsample_rates (tuple[int], optional): Upsampling rates for the upsampling blocks. Defaults to (8, 8, 2, 2).
         leaky_relu_slope (float, optional): Slope for the Leaky ReLU activation. Defaults to 0.2.
         num_mels (int, optional): Number of mel-frequency bins in the input mel-spectrogram. Defaults to 128.
@@ -280,12 +279,10 @@ class RefineGANGenerator(nn.Module):
         gin_channels (int, optional): Number of channels for the global conditioning input. Defaults to 256.
         checkpointing (bool, optional): Whether to use checkpointing for memory efficiency. Defaults to False.
     """
-
     def __init__(
         self,
         *,
-        sample_rate: int = 44100,
-        downsample_rates: tuple[int] = (2, 2, 8, 8),  # unused
+        sr: int = 44100,
         upsample_rates: tuple[int] = (8, 8, 2, 2),
         leaky_relu_slope: float = 0.2,
         num_mels: int = 128,
@@ -293,6 +290,10 @@ class RefineGANGenerator(nn.Module):
         gin_channels: int = 256,
         checkpointing: bool = False,
         upsample_initial_channel=512,
+        # These 3 get absorbed:
+        resblock_kernel_sizes: tuple[int] = (3, 7, 11), # unused
+        resblock_dilation_sizes: tuple[int] = [(1, 3, 5), (1, 3, 5), (1, 3, 5)], # unused
+        upsample_kernel_sizes: tuple[int] = (16, 16, 4, 4), # unused
     ):
         super().__init__()
         self.upsample_rates = upsample_rates
@@ -300,7 +301,7 @@ class RefineGANGenerator(nn.Module):
         self.checkpointing = checkpointing
 
         self.upp = np.prod(upsample_rates)
-        self.m_source = SineGenerator(sample_rate)
+        self.m_source = SineGenerator(sr)
 
         # expanded f0 sinegen -> match mel_conv
         # (8, 1, 17280) -> (8, 16, 17280)

@@ -318,7 +318,7 @@ class Pipeline:
 
             feats = feats.view(1, -1).to(self.device)
 
-            # extract features
+            # extract features with contentvec on audio0
             feats = model(feats)["last_hidden_state"]
 
             feats = (
@@ -360,12 +360,22 @@ class Pipeline:
                 pitch, pitchf = None, None
             p_len = torch.tensor([p_len], device=self.device).long()
 
+            # Inference
             audio1 = (
-                (net_g.infer(feats.float(), p_len, pitch, pitchf.float(), sid, seed)[0][0, 0])
-                .data.cpu()
+                net_g.infer(
+                    phone=feats.float(),        # phone
+                    phone_lengths=p_len,        # phone_lengths
+                    pitch=pitch,                # quantized f0 curve
+                    nsff0=pitchf.float(),       # float f0 curve
+                    sid=sid,                    # speaker id
+                    seed=seed                  # inference seed
+                )[0][0, 0]
+                .detach()
+                .cpu()
                 .float()
                 .numpy()
             )
+
             # clean up
             del feats, feats0, p_len
             if torch.cuda.is_available():
@@ -475,6 +485,8 @@ class Pipeline:
         s = 0
         audio_opt = []
         t = None
+
+        # Padding for 16k audio
         audio_pad = np.pad(audio, (self.t_pad, self.t_pad), mode="reflect")
         p_len = audio_pad.shape[0] // self.window
         inp_f0 = None

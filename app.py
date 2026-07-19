@@ -67,12 +67,12 @@ CodenameViolet = loadThemes.load_theme() or "ParityError/Interstellar"
 with gr.Blocks(
     title="Codename-RVC-Fork 🍇"
 ) as Applio:
-    gr.Markdown("# Codename-RVC-Fork 🍇 v4.2.0")
+    gr.Markdown("# Codename-RVC-Fork 🍇 v4.3.0")
     gr.Markdown(
-        "ㅤㅤBased on Applioㅤㅤ"
+        "ㅤㅤ✨ Originally based on Applio, evolved into its own independent project ✨ㅤㅤ"
     )
     gr.Markdown(
-        "ㅤㅤㅤ[Support - Community Discord](https://discord.gg/nQFpNBvvd3) ㅤ/ ㅤ[GitHub](https://github.com/codename0og/codename-rvc-fork-4)"
+        "ㅤㅤㅤㅤ[Support - Community Discord](https://discord.gg/ymfdwx5jwZ) ㅤ/ ㅤ[GitHub](https://github.com/codename0og/codename-rvc-fork-4)"
     )
     with gr.Tab("Inference"):
         inference_tab()

@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Conv1d
 from torch.nn.utils.parametrizations import weight_norm, spectral_norm
-from torch.utils.checkpoint import checkpoint
 
 from rvc.lib.algorithm.discriminators.multi.pqmf import PQMF
 
@@ -100,10 +99,8 @@ class CoMBD_SBD_UnivHD_Combined(nn.Module):
         sample_rate: int,
         segment_size_samples: int,
         use_spectral_norm: bool = False,
-        use_checkpointing: bool = False,
     ):
         super().__init__()
-        self.use_checkpointing = use_checkpointing
 
         # PQMF banks for preparing real audio hierarchy for CoMBD.
         # pqmf_lv2: 4-band -> subband 0 = 1/4-rate lowpass (matches gen stage lv2)
@@ -136,12 +133,8 @@ class CoMBD_SBD_UnivHD_Combined(nn.Module):
         sbd_rs, sbd_gs, sbd_frs, sbd_fgs = self.sbd(y, y_hat_full)
 
         # UnivHD: harmonic discriminator on full-res only
-        if self.training and self.use_checkpointing:
-            univhd_r, fmap_univhd_r = checkpoint(self.univhd, y, use_reentrant=False)
-            univhd_g, fmap_univhd_g = checkpoint(self.univhd, y_hat_full, use_reentrant=False)
-        else:
-            univhd_r, fmap_univhd_r = self.univhd(y)
-            univhd_g, fmap_univhd_g = self.univhd(y_hat_full)
+        univhd_r, fmap_univhd_r = self.univhd(y)
+        univhd_g, fmap_univhd_g = self.univhd(y_hat_full)
 
         return (
             combd_rs + sbd_rs + [univhd_r],
@@ -149,6 +142,61 @@ class CoMBD_SBD_UnivHD_Combined(nn.Module):
             combd_frs + sbd_frs + [fmap_univhd_r],
             combd_fgs + sbd_fgs + [fmap_univhd_g],
         )
+
+
+
+    # # Debug version of forward. While above we have normal one but just commented out.
+    # def forward(
+        # self,
+        # y: torch.Tensor,
+        # y_hat_list: List[torch.Tensor],
+    # ) -> Tuple[List, List, List, List]:
+        # y_hat_full = y_hat_list[-1]
+
+        # y_lv2 = self._pqmf_lv2.analysis(y)[:, :1, :]
+        # y_lv1 = self._pqmf_lv1.analysis(y)[:, :1, :]
+        # ys = [y_lv2, y_lv1, y]
+
+        # combd_rs, combd_gs, combd_frs, combd_fgs = self.combd(ys, y_hat_list)
+        # sbd_rs,   sbd_gs,   sbd_frs,   sbd_fgs   = self.sbd(y, y_hat_full)
+
+        # univhd_r, fmap_univhd_r = self.univhd(y)
+        # univhd_g, fmap_univhd_g = self.univhd(y_hat_full)
+
+        # # ── FM debug ──────────────────────────────────────────────────────────
+        # if not hasattr(self, '_fm_debug_step'):
+            # self._fm_debug_step = 0
+        # self._fm_debug_step += 1
+
+        # if self._fm_debug_step % 10 == 0:
+            # def _fm(frs, fgs):
+                # loss = 0.0
+                # for dr, dg in zip(frs, fgs):
+                    # for rl, gl in zip(dr, dg):
+                        # loss += F.l1_loss(rl.detach(), gl.detach()).item()
+                # return loss
+
+            # fm_combd  = _fm(combd_frs,        combd_fgs)
+            # fm_sbd    = _fm(sbd_frs,          sbd_fgs)
+            # fm_univhd = _fm([fmap_univhd_r],  [fmap_univhd_g])
+
+            # print(
+                # f"[FM@{self._fm_debug_step}] "
+                # f"combd={fm_combd:.4f}  "
+                # f"sbd={fm_sbd:.4f}  "
+                # f"univhd={fm_univhd:.4f}  "
+                # f"total={fm_combd+fm_sbd+fm_univhd:.4f}"
+            # )
+        # # ─────────────────────────────────────────────────────────────────────
+
+        # return (
+            # combd_rs + sbd_rs + [univhd_r],
+            # combd_gs + sbd_gs + [univhd_g],
+            # combd_frs + sbd_frs + [fmap_univhd_r],
+            # combd_fgs + sbd_fgs + [fmap_univhd_g],
+        # )
+
+
 
 
 # =============================================================================
@@ -390,9 +438,26 @@ class UnivHD(nn.Module):
         self.final_conv = weight_norm(nn.Conv2d(self._MDC_OUT, 1, kernel_size=(freq_kernel, 1)))
 
     def _stft_magnitude(self, x):
-        return torch.stft(x.squeeze(1), n_fft=self.n_fft, hop_length=self.hop_length,
-                          win_length=self.win_length, window=self.window,
-                          center=True, return_complex=True).abs()
+        return torch.stft(
+            x.squeeze(1),
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=self.window,
+            center=True,
+            return_complex=True
+        ).abs()
+
+    # def _stft_magnitude(self, x):
+        # x = x - x.mean(dim=-1, keepdim=True)  # DC removal
+        # x = torch.stft(
+            # x.squeeze(1), n_fft=self.n_fft, hop_length=self.hop_length,
+            # win_length=self.win_length, window=self.window,
+            # center=True, return_complex=True,
+        # )
+        # # Parseval normalization
+        # x = x / math.sqrt(self.n_fft)
+        # return x.abs()
 
     def forward(self, waveform):
         x = self.harmonic_filter(self._stft_magnitude(waveform))

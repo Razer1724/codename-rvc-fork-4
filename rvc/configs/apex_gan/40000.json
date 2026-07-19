@@ -1,7 +1,8 @@
 {
     "train": {
         "seed": 1234,
-        "learning_rate": 0.0001,
+        "learning_rate_g": 0.0001,
+        "learning_rate_d": 0.0001,
         "betas": [
             0.8,
             0.99
@@ -24,6 +25,8 @@
         "mel_fmax": null
     },
     "model": {
+        "gen_istft_n_fft": 26,
+        "gen_istft_hop_size": 4,
         "inter_channels": 192,
         "hidden_channels": 192,
         "filter_channels": 768,

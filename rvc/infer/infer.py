@@ -265,16 +265,13 @@ class VoiceConverter:
             start_time = time.time()
             print(f"Converting audio '{audio_input_path}'...")
 
-            audio = load_audio_infer(
-                audio_input_path,
-                16000,
-                **kwargs,
-            )
+            # Loading the input audio and downsample to 16khz
+            audio = load_audio_infer(audio_input_path, 16000, **kwargs)
             audio_max = np.abs(audio).max() / 0.95
-
             if audio_max > 1:
                 audio /= audio_max
 
+            # Load in the feature embedder model
             if not self.hubert_model or embedder_model != self.last_embedder_model:
                 self.load_hubert(embedder_model, embedder_model_custom)
                 self.last_embedder_model = embedder_model
@@ -285,7 +282,6 @@ class VoiceConverter:
                 .strip("\n")
                 .strip('"')
                 .strip()
-                .replace("trained", "added")
                 if index_path and os.path.exists(index_path) else ""
             )
 
@@ -298,6 +294,7 @@ class VoiceConverter:
             else:
                 chunks = [audio]
 
+            # Seed handling
             if seed != 0:
                 torch.manual_seed(seed)
                 torch.cuda.manual_seed_all(seed)
@@ -310,7 +307,10 @@ class VoiceConverter:
                 torch.cuda.manual_seed_all(seed)
                 print(f"[INFER] Randomized seed exposed for reproduction: {seed}")
 
+
+            # Collect chunked inference outputs ( if chunking's used )
             converted_chunks = []
+            # Inference
             for c in chunks:
                 audio_opt = self.vc.pipeline(
                     model=self.hubert_model,
@@ -359,9 +359,15 @@ class VoiceConverter:
             output_path_format = audio_output_path.replace(
                 ".wav", f".{export_format.lower()}"
             )
+            intermediate_wav = audio_output_path
             audio_output_path = self.convert_audio_format(
                 audio_output_path, output_path_format, export_format
             )
+            if export_format != "WAV" and os.path.exists(intermediate_wav):
+                try:
+                    os.remove(intermediate_wav)
+                except OSError:
+                    pass
 
             elapsed_time = time.time() - start_time
             print(
@@ -487,17 +493,12 @@ class VoiceConverter:
         """
         Cleans up the model and releases resources.
         """
-        if self.hubert_model is not None:
-            del self.net_g, self.n_spk, self.vc, self.hubert_model, self.tgt_sr
-            self.hubert_model = self.net_g = self.n_spk = self.vc = self.tgt_sr = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        self.loaded_index = None
-        del self.net_g, self.cpt, self.active_cpt
+        import gc
+        for attr in ("net_g", "n_spk", "vc", "hubert_model", "tgt_sr", "cpt", "active_cpt", "loaded_model", "loaded_index"):
+            setattr(self, attr, None)
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        self.cpt = None
-        self.active_cpt = None
 
     def load_model(self, weight_root):
         """
@@ -559,31 +560,29 @@ class VoiceConverter:
             self.version = self.active_cpt.get("version", "v1")
             self.text_enc_hidden_dim = 768 if self.version == "v2" else 256
             self.vocoder = self.active_cpt.get("vocoder", "HiFi-GAN")
-            self.vits2_mode = self.active_cpt.get("vits2_mode", False)
 
+            synth_kwargs = {
+                "use_f0": self.use_f0,
+                "text_enc_hidden_dim": self.text_enc_hidden_dim,
+                "vocoder": self.vocoder,
+            }
+
+            # RingFormer and APEX-GAN require istft params
             if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 ringformer_istft = self.active_cpt.get("ringformer_istft", [None, None])
-                self.gen_istft_n_fft = ringformer_istft[0]
-                self.gen_istft_hop_size = ringformer_istft[1]
-                self.net_g = Synthesizer(
-                    *self.active_cpt["config"],
-                    use_f0=self.use_f0,
-                    gen_istft_n_fft=self.gen_istft_n_fft,
-                    gen_istft_hop_size=self.gen_istft_hop_size,
-                    text_enc_hidden_dim=self.text_enc_hidden_dim,
-                    vocoder=self.vocoder,
-                    vits2_mode=self.vits2_mode,
-                )
-            else:
-                self.net_g = Synthesizer(
-                    *self.active_cpt["config"],
-                    use_f0=self.use_f0,
-                    text_enc_hidden_dim=self.text_enc_hidden_dim,
-                    vocoder=self.vocoder,
-                    vits2_mode=self.vits2_mode,
-                )
+                synth_kwargs["gen_istft_n_fft"] = ringformer_istft[0]
+                synth_kwargs["gen_istft_hop_size"] = ringformer_istft[1]
 
-            del self.net_g.enc_q
+            if self.vocoder == "APEX-GAN":
+                apex_gan_istft = self.active_cpt.get("apex_gan_istft", [None, None])
+                synth_kwargs["gen_istft_n_fft"] = apex_gan_istft[0]
+                synth_kwargs["gen_istft_hop_size"] = apex_gan_istft[1]
+
+            # Model init
+            self.net_g = Synthesizer(*self.active_cpt["config"], **synth_kwargs)
+
+            del self.net_g.enc_q # Posterior encoder is training-only
+
             self.net_g.load_state_dict(self.active_cpt["weight"], strict=False)
             self.net_g = self.net_g.to(self.config.device).float()
             self.net_g.eval()

@@ -1,7 +1,8 @@
 {
     "train": {
         "seed": 1234,
-        "learning_rate": 0.0001,
+        "learning_rate_g": 0.0001,
+        "learning_rate_d": 0.0001,
         "betas": [
             0.8,
             0.99
