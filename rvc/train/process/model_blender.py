@@ -2,6 +2,8 @@ import os
 import torch
 from collections import OrderedDict
 
+deep_debug_merging = False # For dev or debugging purposes
+
 def extract(ckpt):
     a = ckpt["model"]
     opt = OrderedDict()
@@ -10,7 +12,10 @@ def extract(ckpt):
         if "enc_q" in key:
             continue
         opt["weight"][key] = a[key]
-    print(f"[DEBUG] extract() returning keys: {list(opt['weight'].keys())}")
+
+    if deep_debug_merging:
+        print(f"[DEBUG] extract() returning keys: {list(opt['weight'].keys())}")
+
     return opt
 
 def model_blender(name, path1, path2, ratio):
@@ -21,8 +26,10 @@ def model_blender(name, path1, path2, ratio):
         # Load checkpoints
         ckpt1 = torch.load(path1, map_location="cpu", weights_only=True)
         ckpt2 = torch.load(path2, map_location="cpu", weights_only=True)
-        print(f"[DEBUG] Loaded ckpt1 keys: {list(ckpt1.keys())}")
-        print(f"[DEBUG] Loaded ckpt2 keys: {list(ckpt2.keys())}")
+
+        if deep_debug_merging:
+            print(f"[DEBUG] Loaded ckpt1 keys: {list(ckpt1.keys())}")
+            print(f"[DEBUG] Loaded ckpt2 keys: {list(ckpt2.keys())}")
 
         # Check sample rate compatibility (normalize "48k" -> 48000)
         def _normalize_sr(v):
@@ -56,8 +63,9 @@ def model_blender(name, path1, path2, ratio):
             ckpt2 = ckpt2["weight"]
             print("[DEBUG] Using ckpt2['weight'] directly")
 
-        print(f"[DEBUG] ckpt1 model keys: {list(ckpt1.keys())}")
-        print(f"[DEBUG] ckpt2 model keys: {list(ckpt2.keys())}")
+        if deep_debug_merging:
+            print(f"[DEBUG] ckpt1 model keys: {list(ckpt1.keys())}")
+            print(f"[DEBUG] ckpt2 model keys: {list(ckpt2.keys())}")
 
         # Check model architecture compatibility
         if sorted(list(ckpt1.keys())) != sorted(list(ckpt2.keys())):
@@ -71,7 +79,10 @@ def model_blender(name, path1, path2, ratio):
         for key in ckpt1.keys():
             if key == "emb_g.weight" and ckpt1[key].shape != ckpt2[key].shape:
                 min_shape0 = min(ckpt1[key].shape[0], ckpt2[key].shape[0])
-                print(f"[DEBUG] Blending key '{key}' with different shapes, using min shape: {min_shape0}")
+
+                if deep_debug_merging:
+                    print(f"[DEBUG] Blending key '{key}' with different shapes, using min shape: {min_shape0}")
+
                 opt["weight"][key] = (
                     ratio * (ckpt1[key][:min_shape0].float())
                     + (1 - ratio) * (ckpt2[key][:min_shape0].float())
@@ -81,7 +92,9 @@ def model_blender(name, path1, path2, ratio):
                     ratio * (ckpt1[key].float())
                     + (1 - ratio) * (ckpt2[key].float())
                 ).half()
-            print(f"[DEBUG] Blended key '{key}': shape {opt['weight'][key].shape}")
+
+            if deep_debug_merging:
+                print(f"[DEBUG] Blended key '{key}': shape {opt['weight'][key].shape}")
 
         # Append additional configuration data
         opt["config"] = cfg

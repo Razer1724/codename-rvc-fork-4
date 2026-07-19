@@ -110,29 +110,37 @@ def extract_model(
                 hps.model.gen_istft_hop_size,
             ]
 
-        # Backwards compatibility for mainline for "RVC" architecture
-        if architecture == "RVC":
-            opt = replace_keys_in_dict(
-                replace_keys_in_dict(
-                    opt, ".parametrizations.weight.original1", ".weight_v"
-                ),
-                ".parametrizations.weight.original0",
-                ".weight_g",
-            )
-        # Check for old keys for non-RVC architecture
-        elif architecture != "RVC":
-        #elif architecture in ["Fork", "Fork/Applio"]:
-            if any(key.endswith(".weight_v") for key in opt.keys()) and any(key.endswith(".weight_g") for key in opt.keys()):
-                opt = replace_keys_in_dict(
-                    opt, 
-                    ".weight_v", 
-                    ".parametrizations.weight.original1"
-                )
-                opt = replace_keys_in_dict(
-                    opt, 
-                    ".weight_g", 
-                    ".parametrizations.weight.original0"
-                )
+        if vocoder == "APEX-GAN":
+            opt["apex_gan_istft"] = [
+                hps.model.gen_istft_n_fft,
+                hps.model.gen_istft_hop_size,
+            ]
+
+        # Since fork uses new API for weight norm ( parametrizations )
+        # and mainline RVC ( Original ), W-okada and such rely on old API, we're performing keys conversion.
+        #
+        #   Old API:  .weight_g / .weight_v
+        #   New API:  .parametrizations.weight.original0 (direction) / .original1 (gain)
+
+        NEW_TO_OLD = [
+            (".parametrizations.weight.original1", ".weight_g"),
+            (".parametrizations.weight.original0", ".weight_v"),
+        ]
+        OLD_TO_NEW = [
+            (".weight_g", ".parametrizations.weight.original1"),
+            (".weight_v", ".parametrizations.weight.original0"),
+        ]
+
+        has_new = any("parametrizations.weight.original" in k for k in opt)
+        has_old = any(k.endswith(".weight_v") or k.endswith(".weight_g") for k in opt)
+
+        if architecture == "RVC" and has_new: # RVC Arch models TRAIN with new api, but are SAVED with old-API compatibility in mind.
+            for old, new in NEW_TO_OLD:
+                opt = replace_keys_in_dict(opt, old, new)
+
+        elif architecture != "RVC" and has_old: # Fork arch doesn't use old API but this is a safety-fallback for whatever
+            for old, new in OLD_TO_NEW:
+                opt = replace_keys_in_dict(opt, old, new)
 
         torch.save(opt, model_path)
         print(f"Saved model '{model_path}' (epoch {epoch} and step {step})")

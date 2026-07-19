@@ -270,25 +270,18 @@ initial_sample_rate = "48000"
 
 # Microarch. dependent features, options, functionalities etc.. Might expand in future.
 fp16_check = None
+has_ampere = microarchitecture_capability_checker()
 
-if microarchitecture_capability_checker():
-    # Ampere-Microarchitecture and higher viable:
-    initial_optimizer = "AdamW"
-    initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
-    architecture_choices = ["RVC", "Fork/Applio", "Fork"]
-    fp16_check = True
-else:
-    # Below Ampere-Microarchitecture viable:
-    initial_optimizer = "AdamW"
-    initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
-    architecture_choices = ["RVC", "Fork/Applio"]
-    fp16_check = True
+initial_optimizer = "AdamW"
+initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
+architecture_choices = ["RVC", "Fork"]
+fp16_check = True
 
 # FP16 checker
 if fp16_check:
     if check_if_fp16():
         initial_optimizer = "AdamW"
-        initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("DiffGrad", "DiffGrad"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
+        initial_optimizer_choices = [("AdamW", "AdamW"), ("AdaBelief", "AdaBelief"), ("RAdam", "RAdam"), ("Ranger21", "Ranger21"), ("Sched-Free AdamW", "Sched-Free AdamW"), ("Sched-Free RAdam", "Sched-Free RAdam")]
 
 
 # Train Tab
@@ -324,14 +317,14 @@ def train_tab():
                 )
                 architecture = gr.Radio(
                     label="Architecture",
-                    info="Choose the model architecture:\n- **RVC (V2):ㅤDefault/OG-Architecture - Compatible with all clients.**\n- **Fork/Applio:ㅤOG-Arch's discs + RefineGAN** - Only for this Fork or Applio **( Experimental. )** \n- **Fork:ㅤCodename-selected custom archs** - Only for this Fork **( Exclusive. )**",
+                    info="Choose the model architecture:\n- **RVC (V2):ㅤDefault/OG-Architecture - Compatible with all clients.**\n- **Fork:ㅤRefineGAN, RingFormer, APEX-GAN** - Only for this Fork. \n ( RingFormer / APEX-GAN require Ampere GPU or newer. )",
                     choices=architecture_choices,
                     value="RVC",
                     interactive=True,
                     visible=True,
                     key='architecture'
                 )
-                vocoder_arch = gr.State("hifi_refine")
+                vocoder_arch = gr.State("hifi")
                 optimizer_choice_g = gr.Radio(
                     label="Optimizer (G)",
                     info=OPTIMIZER_INFO,
@@ -361,7 +354,7 @@ def train_tab():
                 )
                 vocoder = gr.Radio(
                     label="Vocoder",
-                    info=VOCODER_INFO,
+                    info=VOCODER_INFO_RVC,
                     choices=["HiFi-GAN"],
                     value="HiFi-GAN",
                     interactive=False,
@@ -858,13 +851,13 @@ def train_tab():
                     use_best_step = gr.Checkbox(
                         label="Best in-epoch step",
                         info="Tracks the step with lowest FM+Mel loss each epoch and uses those weights for eval preview and model extraction.",
-                        value=False,
+                        value=True,
                         interactive=True,
                         key='use_best_step'
                     )
                     double_d_updates = gr.Checkbox(
                         label="Double Discriminator Update",
-                        info="Runs the discriminator backward/update step twice per batch. Gives D more gradient signal on small datasets without changing LR.",
+                        info="Runs the discriminator backward/update step twice per batch. Gives D more gradient signal on small datasets.",
                         value=False,
                         interactive=True,
                         key='double_d_updates'
@@ -1147,23 +1140,12 @@ def train_tab():
                 return {"visible": embedder_model == "custom", "__type__": "update"}
 
             def toggle_architecture(architecture, vocoder_arch):
-                if architecture == "Fork/Applio":
-                    vocoder_arch_value = "hifi_refine"
-                    return (
-                        {
-                            "choices": ["32000", "40000", "48000"],
-                            "__type__": "update",
-                        },
-                        {
-                            "choices": ["RefineGAN"],
-                            "__type__": "update",
-                            "interactive": True,
-                            "value": "RefineGAN",
-                        },
-                        vocoder_arch_value,
-                    )
-                elif architecture == "Fork":
-                    vocoder_arch_value = "APEX-GAN"
+                if architecture == "Fork":
+                    fork_vocoders = ["RefineGAN"]
+                    if has_ampere:
+                        fork_vocoders += ["RingFormer_v1", "RingFormer_v2", "APEX-GAN"]
+                    default_vocoder = "RefineGAN" if not has_ampere else "APEX-GAN"
+                    default_vocoder_arch = "refine" if not has_ampere else "apex_gan"
                     return (
                         {
                             "choices": ["24000", "32000", "40000", "48000"],
@@ -1171,15 +1153,16 @@ def train_tab():
                             "value": "48000",
                         },
                         {
-                            "choices": ["RingFormer_v1", "RingFormer_v2", "APEX-GAN"],
+                            "choices": fork_vocoders,
                             "__type__": "update",
                             "interactive": True,
-                            "value": "APEX-GAN",
+                            "value": default_vocoder,
+                            "info": VOCODER_INFO_FORK,
                         },
-                        vocoder_arch_value,
+                        default_vocoder_arch,
                     )
                 else:
-                    vocoder_arch_value = "hifi_refine"
+                    vocoder_arch_value = "hifi"
                     return (
                         {
                             "choices": ["32000", "40000", "48000"],
@@ -1191,11 +1174,22 @@ def train_tab():
                             "__type__": "update",
                             "value": "HiFi-GAN",
                             "interactive": False,
+                            "info": VOCODER_INFO_RVC,
                         },
                         vocoder_arch_value,
                     )
             def fork_vocoder_handler(architecture, vocoder_arch, vocoder):
-                if architecture == "Fork" and vocoder == "RingFormer_v1":
+                if architecture == "Fork" and vocoder == "RefineGAN":
+                    vocoder_arch_value = "refine"
+                    return (
+                        {
+                            "choices": ["32000", "40000", "48000"],
+                            "__type__": "update",
+                            "value": "48000",
+                        },
+                        vocoder_arch_value,
+                    )
+                elif architecture == "Fork" and vocoder == "RingFormer_v1":
                     vocoder_arch_value = "ringformer_v1"
                     return (
                         {

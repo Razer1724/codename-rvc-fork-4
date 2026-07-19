@@ -322,7 +322,7 @@ def prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=F
         collate_fn=collate_fn,
         batch_sampler=train_sampler,
         persistent_workers=enable_persistent_workers,
-        prefetch_factor=8
+        prefetch_factor=2
     )
     train_loader_safety(train_loader)
 
@@ -344,7 +344,7 @@ def prepare_dataloaders(config, n_gpus, rank, batch_size, build_extra_d_loader=F
             collate_fn=collate_fn,
             batch_sampler=extra_d_sampler,
             persistent_workers=enable_persistent_workers,
-            prefetch_factor=4
+            prefetch_factor=2
         )
 
     return train_loader, extra_d_loader
@@ -448,10 +448,6 @@ def _make_optimizer(model, choice, lr, num_epochs=None, num_batches=None, param_
 
     elif choice == "RAdam":
         return torch.optim.RAdam(params, lr=lr, betas=(0.8, 0.99), eps=1e-9, weight_decay=0.01, decoupled_weight_decay=True)
-
-    elif choice == "DiffGrad":
-        from rvc.train.custom_optimizers.diffgrad import diffgrad
-        return diffgrad(params, lr=lr, betas=(0.8, 0.99), eps=1e-9, weight_decay=0.0)
 
     elif choice == "Ranger21":
         from rvc.train.custom_optimizers.ranger21 import Ranger21
@@ -1082,6 +1078,8 @@ def run(
             stopper=stopper,
             extra_d_loader=extra_d_loader,
         )
+        if should_stop:
+            break
 
         if use_warmup and epoch <= warmup_duration:
             if warmup_scheduler_g:

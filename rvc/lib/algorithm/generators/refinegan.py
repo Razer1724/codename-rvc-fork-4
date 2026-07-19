@@ -279,7 +279,6 @@ class RefineGANGenerator(nn.Module):
         gin_channels (int, optional): Number of channels for the global conditioning input. Defaults to 256.
         checkpointing (bool, optional): Whether to use checkpointing for memory efficiency. Defaults to False.
     """
-
     def __init__(
         self,
         *,
@@ -291,6 +290,10 @@ class RefineGANGenerator(nn.Module):
         gin_channels: int = 256,
         checkpointing: bool = False,
         upsample_initial_channel=512,
+        # These 3 get absorbed:
+        resblock_kernel_sizes: tuple[int] = (3, 7, 11), # unused
+        resblock_dilation_sizes: tuple[int] = [(1, 3, 5), (1, 3, 5), (1, 3, 5)], # unused
+        upsample_kernel_sizes: tuple[int] = (16, 16, 4, 4), # unused
     ):
         super().__init__()
         self.upsample_rates = upsample_rates

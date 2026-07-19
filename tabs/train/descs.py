@@ -1,12 +1,8 @@
 import textwrap
 
 
-VOCODER_INFO = textwrap.dedent("""\
+VOCODER_INFO_FORK = textwrap.dedent("""\
     **Vocoder for audio synthesis:**
-    
-    **HiFi-GAN:**
-    - **Arch overview:** HiFi-GAN + Hn-NSF. ( RVC's og vocoder )
-    - **COMPATIBILITY:** Offline: RVC, Fork, Applio. Streaming: W-okada, Vonovox
     
     **RefineGAN:**
     - **Arch overview:** ParallelResBlocks + AdaIN + Hn-NSF
@@ -18,16 +14,26 @@ VOCODER_INFO = textwrap.dedent("""\
     ⚠ This architecture is under a big question mark atm. ⚠
     
     **APEX-GAN:**
-    - **Arch overview:** Snake ResBlocks + GeoSaw (FGSS) excitation + per-stage antialiased injection.
+    - **Arch overview:** Pitch-Conditioned Snake ResBlocks + Conv-iSTFT Hybrid architecture.
     - **COMPATIBILITY:** Offline: This Fork. Streaming: None atm.
     
     **NOTES:**
     **( Offline = Static inference/Covers, Streaming = Real-Time voice changers )**
-    **( RingFormer Requires min. RTX 30 series [ At least Ampere microarchitecture ] )**
     **( Each Vocoder and its supported sample rates require appropriate pretrained models )**
 """)
 
 
+VOCODER_INFO_RVC = textwrap.dedent("""\
+    **Vocoder for audio synthesis:**
+    
+    **HiFi-GAN:**
+    - **Arch overview:** HiFi-GAN + Hn-NSF. ( RVC's og vocoder )
+    - **COMPATIBILITY:** Offline: RVC, Fork, Applio. Streaming: W-okada, Vonovox
+    
+    **NOTES:**
+    **( Offline = Static inference/Covers, Streaming = Real-Time voice changers )**
+    **( Each Vocoder and its supported sample rates require appropriate pretrained models )**
+""")
 
 
 DATASET_TRUNCATION_INFO = textwrap.dedent("""\
@@ -214,7 +220,6 @@ Choose an optimizer used in training:
 - **AdamW:** Default; Safe and reliable.
 - **AdaBelief:** Adapts step size by "belief" in the gradient direction. ( **Likely more stable than AdamW in GANs** )
 - **RAdam:** Rectified Adam. ( **Can help** with early instability - **Most likely slower convergence** )
-- **DiffGrad:** An optimizer with CNN in mind. ( **Probs** a good AdamW alternative - **For finetuning** )
 - **Ranger21:** AdamW + LookAhead and few more extras. ( **Most likely unstable** )
 """)
 

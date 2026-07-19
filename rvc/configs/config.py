@@ -3,10 +3,15 @@ import os
 import json
 
 arch_config_paths = {
-    "hifi_refine": [
-        os.path.join("hifi_refine", "48000.json"),
-        os.path.join("hifi_refine", "40000.json"),
-        os.path.join("hifi_refine", "32000.json"),
+    "hifi": [
+        os.path.join("hifi", "48000.json"),
+        os.path.join("hifi", "40000.json"),
+        os.path.join("hifi", "32000.json"),
+    ],
+    "refine": [
+        os.path.join("refine", "48000.json"),
+        os.path.join("refine", "40000.json"),
+        os.path.join("refine", "32000.json"),
     ],
     "ringformer_v1": [
         os.path.join("ringformer_v1", "48000.json"),
@@ -55,13 +60,13 @@ class Config:
             else None
         )
 
-        self.json_config = self.load_config_json("hifi_refine")
+        self.json_config = self.load_config_json("hifi")
         self.gpu_mem = None
         self.x_pad, self.x_query, self.x_center, self.x_max = self.device_config()
 
-    def load_config_json(self, vocoder_arch="hifi_refine"):
+    def load_config_json(self, vocoder_arch="hifi"):
         configs = {}
-        for config_file in arch_config_paths.get(vocoder_arch, arch_config_paths["hifi_refine"]):
+        for config_file in arch_config_paths.get(vocoder_arch, arch_config_paths["hifi"]):
             config_path = os.path.join("rvc", "configs", config_file)
             with open(config_path, "r") as f:
                 configs[config_file] = json.load(f)
@@ -76,7 +81,18 @@ class Config:
 
         self.is_half = fp16_run_value 
 
-        for config_path in arch_config_paths["hifi_refine"]:
+        for config_path in arch_config_paths["hifi"]:
+            full_config_path = os.path.join("rvc", "configs", config_path)
+            try:
+                with open(full_config_path, "r") as f:
+                    config = json.load(f)
+                config["train"]["fp16_run"] = fp16_run_value
+                with open(full_config_path, "w") as f:
+                    json.dump(config, f, indent=4)
+            except FileNotFoundError:
+                print(f"File not found: {full_config_path}")
+
+        for config_path in arch_config_paths["refine"]:
             full_config_path = os.path.join("rvc", "configs", config_path)
             try:
                 with open(full_config_path, "r") as f:
@@ -127,7 +143,7 @@ class Config:
         if not arch_config_paths:
             raise FileNotFoundError("No configuration paths provided.")
 
-        full_config_path = os.path.join("rvc", "configs", arch_config_paths["hifi_refine"][0])
+        full_config_path = os.path.join("rvc", "configs", arch_config_paths["hifi"][0])
         try:
             with open(full_config_path, "r") as f:
                 config = json.load(f)
@@ -148,7 +164,7 @@ class Config:
         if not arch_config_paths:
             raise FileNotFoundError("No configuration paths provided.")
 
-        full_config_path = os.path.join("rvc", "configs", arch_config_paths["hifi_refine"][0])
+        full_config_path = os.path.join("rvc", "configs", arch_config_paths["hifi"][0])
         try:
             with open(full_config_path, "r") as f:
                 config = json.load(f)

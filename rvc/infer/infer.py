@@ -560,31 +560,29 @@ class VoiceConverter:
             self.version = self.active_cpt.get("version", "v1")
             self.text_enc_hidden_dim = 768 if self.version == "v2" else 256
             self.vocoder = self.active_cpt.get("vocoder", "HiFi-GAN")
-            self.vits2_mode = self.active_cpt.get("vits2_mode", False)
 
+            synth_kwargs = {
+                "use_f0": self.use_f0,
+                "text_enc_hidden_dim": self.text_enc_hidden_dim,
+                "vocoder": self.vocoder,
+            }
+
+            # RingFormer and APEX-GAN require istft params
             if self.vocoder in ["RingFormer_v1", "RingFormer_v2"]:
                 ringformer_istft = self.active_cpt.get("ringformer_istft", [None, None])
-                self.gen_istft_n_fft = ringformer_istft[0]
-                self.gen_istft_hop_size = ringformer_istft[1]
-                self.net_g = Synthesizer(
-                    *self.active_cpt["config"],
-                    use_f0=self.use_f0,
-                    gen_istft_n_fft=self.gen_istft_n_fft,
-                    gen_istft_hop_size=self.gen_istft_hop_size,
-                    text_enc_hidden_dim=self.text_enc_hidden_dim,
-                    vocoder=self.vocoder,
-                    vits2_mode=self.vits2_mode,
-                )
-            else:
-                self.net_g = Synthesizer(
-                    *self.active_cpt["config"],
-                    use_f0=self.use_f0,
-                    text_enc_hidden_dim=self.text_enc_hidden_dim,
-                    vocoder=self.vocoder,
-                    vits2_mode=self.vits2_mode,
-                )
+                synth_kwargs["gen_istft_n_fft"] = ringformer_istft[0]
+                synth_kwargs["gen_istft_hop_size"] = ringformer_istft[1]
 
-            del self.net_g.enc_q
+            if self.vocoder == "APEX-GAN":
+                apex_gan_istft = self.active_cpt.get("apex_gan_istft", [None, None])
+                synth_kwargs["gen_istft_n_fft"] = apex_gan_istft[0]
+                synth_kwargs["gen_istft_hop_size"] = apex_gan_istft[1]
+
+            # Model init
+            self.net_g = Synthesizer(*self.active_cpt["config"], **synth_kwargs)
+
+            del self.net_g.enc_q # Posterior encoder is training-only
+
             self.net_g.load_state_dict(self.active_cpt["weight"], strict=False)
             self.net_g = self.net_g.to(self.config.device).float()
             self.net_g.eval()

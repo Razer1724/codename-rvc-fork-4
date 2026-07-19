@@ -43,9 +43,9 @@ class Synthesizer(torch.nn.Module):
         checkpointing: bool = False,
         # Other
         use_2_sample_kl: bool = False,
-        # RingFormer
-        gen_istft_n_fft: int = 120,
-        gen_istft_hop_size: int = 30,
+        # RingFormer / APEX-GAN
+        gen_istft_n_fft: int = 32,
+        gen_istft_hop_size: int = 4,
         **kwargs,
     ):
         super().__init__()
@@ -77,7 +77,7 @@ class Synthesizer(torch.nn.Module):
         }
 
         # RingFormer needs inverse stft params
-        if vocoder in ["RingFormer_v1", "RingFormer_v2"]:
+        if vocoder in ["APEX-GAN", "RingFormer_v1", "RingFormer_v2"]:
             dec_kwargs.update({"gen_istft_n_fft": gen_istft_n_fft, "gen_istft_hop_size": gen_istft_hop_size})
 
         # RefineGan specific

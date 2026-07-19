@@ -1,85 +1,98 @@
 # <p align="center">` Codename-RVC-Fork 🍇 4 ` </p>
-## <p align="center">Based on Applio</p>
+<div align="center">
+  
+` " The spiritual successor to Mangio-RVC-Fork "`
 
-<p align="center"> ㅤㅤ👇 You can join my discord server below ( RVC / AI Audio friendly ) 👇ㅤㅤ </p>
+</div>
 
-</p>
+#### <p align="center"> ✨ Originally based on Applio, evolved into its own independent project ✨</p>
+
 <p align="center">
-  <a href="https://discord.gg/ymfdwx5jwZ" target="_blank"> Codename's Sanctuary</a>
+  ㅤㅤTo stay up-to-date with advancements, hang out or get supportㅤㅤ<br>
+  ㅤㅤyou can join my 👇 discord server 👇 ( RVC / AI Audio friendly )ㅤㅤ
 </p>
 
-<p align="center"> ㅤㅤ👆 To stay up-to-date with advancements, hang out or get support 👆ㅤㅤ </p>
+<p align="center">
+  <!-- GitHub Release Version -->
+  <a href="https://github.com/codename0og/codename-rvc-fork-4/releases" target="_blank">
+    <img src="https://img.shields.io/github/v/release/codename0og/codename-rvc-fork-4?include_prereleases&style=flat-for-the-badge&color=8a2be2" alt="Latest Release">
+  </a>
+  
+  <!-- Discord Invite -->
+  <a href="https://discord.gg/ymfdwx5jwZ" target="_blank">
+    <img src="https://img.shields.io/badge/Discord-Join_Sanctuary-7289da?style=flat-for-the-badge&logo=discord&logoColor=white" alt="Discord Online">
+  </a>
+  
+  <!-- GitHub Repo Size -->
+  <img src="https://img.shields.io/github/repo-size/codename0og/codename-rvc-fork-4?style=flat-for-the-badge&color=333" alt="Repository Size">
 
-
-## A lil bit more about the project:
-
-### This fork is pretty much my personal take on Applio. ✨
-``You could say.. A more advanced features-rich Applio ~ With my lil twist.``
-<br/>
-``But If you have any ideas, want to pr or collaborate, feel free to do so!``
-<br/>
+  <!-- License -->
+  <img src="https://img.shields.io/github/license/codename0og/codename-rvc-fork-4?style=flat-for-the-badge&color=success" alt="License">
+</p>
 ㅤ
-<br/>
+
 # ⚠️ㅤ**IMPORTANT** ㅤ⚠️
+<br/>
+ 
 `1. Datasets must be processed properly:`
 - In case of wild dynamic range or inconsistent recording sessions, peak / rms compression is advised.
 - silence-truncating your dataset ( Or at least ensure the gaps / silences aren't too crazy or inconsistent. ) 
 
 `2. Experimental things are experimental for a reason:`
-- If you don't understand what it does, what it brings or how it works? preferably don't use it.
+- If you don't understand what it does, what it brings or how it works? preferably don't use it or ask on my server.
 - Certain features / currently chosen params can be potentially unstable or broken and are a subject to change.
-- Some experimental things might disappear at some point if deemed too unstable / not worth the risk.
+- Some experimental things can get removed at any point if deemed too unstable / not worth the risk.
 
 `3. Clarification on pretrained models, architectures & vocoders:`
 - **Each Architecture/Vocoder requires own dedicated pretrains.**
 ##### 1. HiFi-GAN ( RVC architecture ):
 - The original architecture. ( HiFi-GAN + MPD, MSD )
-- It's pretrained models are auto-downloaded during the first launch.
-- Available for sample rates: 48, 40 and 32khz. <br/><br/>`Models made with this arch are cross-compatible: RVC, Applio and codename-rvc-fork-4.` 
-##### 2. RefineGAN ( Fork / Applio architecture ):
-- Custom architecture. ( RefineGAN + MPD, MSD )
-- **Pretrains available. For more info, visit my discord server.** <br/><br/>`Models made with this arch are LIMITED cross-compatible: codename-rvc-fork-4 and Applio`
+- Its pretrained models are auto-downloaded during the first launch.
+- Available for sample rates: 48, 40 and 32khz. <br/><br/>`Models made with this arch ARE cross-compatible: RVC, Applio and codename-rvc-fork-4.` 
+##### 2. RefineGAN ( Fork architecture ):
+- Custom architecture. ( RefineGAN + MPD, MSD, MRD )
+- **There are no available pretrained models for it yet. ( Applio's one is incompatible. )**<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4`
 ##### 3. RingFormer ( Fork architecture ):
-- As it is right now, this architecture remains in question.
+- This architecture remains in question ~ Might get removed, might get updated.
 ##### 4. APEX-GAN ( Fork architecture ):
-- A direct continuation of the previous vocoder, known under the alias "PCPH-GAN".
-- Custom architecture. ( APEX-GAN + CoMBD, MSB, UnivHD )
+- Custom architecture. ( APEX-GAN + MPD, SBD, MRD )
 - **There are no available pretrained models for it yet. Currently in "trials+polishing" phase.**
 - Supported sample rates: 24, 32, 40 and 48khz.<br/><br/>`Models made with this arch ARE NOT cross-compatible: codename-rvc-fork-4` 
 <br/>
 
-# **Fork's exclusive features:**
- 
-- My own ml-based silence-truncation approach.
-<br/>[More info](https://github.com/codename0og/SmartCutter)
+# **Things exclusive to my fork:**
  
 - F0 / Pitch curve editor for inference integrated in the UI.
  
-- Support for 'Spin' embedder. ` ( and perhaps more in future. ) `
+- Many available optimizers.  ` ( AdamW, AdaBelief, RAdam, Ranger21, Schedule-Free AdamW/RAdam ) `
  
-- Many available optimizers.  ` ( AdamW, RAdam, AdamSPD, Ranger21, DiffGrad ) `
+- Decoupled G/D Tweaking: Schedulers, Optims, Learning Rates etc.
  
-- Different adversarial losses to try. ` ( Available: lsgan, hinge, tprls. [ lsgan is the safe / rvc's default one. ] ) `
+- Support for Multi-scale L1 Mel, classic L1 mel and Hybrid ( L1 Mel + MS-STFT ) spectral losses.
  
-- Support for Multi-scale, classic L1 mel and (EXP) multi-resolution stft spectral losses.
+- Extras such as: Kl loss annealing, 2-sample KL loss calculation, Double-Update for Discriminator and more..
  
-- Support for some of VITS2 enhancements.
-`( Transformer-enhanced normalizing flow + spk conditioned text encoder. )`<br/>
-`( Requires pretrains that were trained with it. )`
+- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, APEX-GAN.
+`( And potentially more in future ..)
  
-- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, APEX-GAN.<br/>
+- Support for many discriminator stacks: Avocodo's, mps/msd/mrd, mpd/sbd/mrd, hmddd and more..
+`( Naturally they require pretrained models. )
  
-- Much better loss logging handling.
-`( Per-epoch-avg loss as the main one, rolling avg as the long-term one )`
+- Much better loss logging handling.<br/>
+`( Per-epoch-avg loss as the main one, rolling avg as the long-term one. )`
  
-- More sophisticated dataset-preprocessing approach.
+- More dataset-preprocessing options and generally simplified workflow ( RMS norm has dbFS auto-correction. ).
  
-- Lots of deeper training-related tweaks directly in the ui. ` ( lr for g/d, schedulers, linear warmup, kl loss annealing and much more .. )`
+- Lots of deeper training-related tweaks directly in the ui.<br/>
+` ( lr for g/d, schedulers, linear warmup, kl loss annealing and much more .. )`
  
-- Direct integration of [SmartCutter](https://github.com/codename0og/SmartCutter)
+- Direct integration of `SmartCutter` - My own ml-based silence-truncation approach.
+<br/>[More info](https://github.com/codename0og/SmartCutter)
  
-- Various speed and performance improvements.
-
+- Various speed, performance and QOL improvements.
+ 
+- A much cleaner, continuously evolving codebase compared to existing alternatives.
+ 
 **Any new / experimental features are always described in releases so, feel free to check it out there.**
   
  
@@ -88,8 +101,6 @@
  
  
 ✨ to-do list ✨
-> - Better long-term logging for pretrained / base models training.
-> - Some additional feedback during training in terms of model's performance.
 > - Need to figure out a better / more appropriate validation..
  
 💡 Ideas / concepts 💡
@@ -135,7 +146,7 @@ To monitor training or visualize data:
 + [wavehax](https://github.com/chomeyama/wavehax)
 + [auraloss](https://github.com/csteinmetz1/auraloss/tree/main)
 + [Avocodo](https://github.com/ncsoft/avocodo)
-
++ [HiFTNet](https://github.com/yl4579/HiFTNet)
  
 ## Disclaimer
 ``The creators, maintainers, and contributors of the original Applio repository, as well as the creator of this fork (Codename;0), which is based on Applio, and the contributors of this fork, are not liable for any legal issues, damages, or consequences arising from the use of this repository or any content generated from it. By using this fork, you acknowledge and accept the following terms:``
@@ -143,4 +154,4 @@ To monitor training or visualize data:
 - The use of this fork is at your own risk.
 - This repository is intended solely for educational, and experimental purposes.
 - Any misuse, including but not limited to illegal activities or violation of third-party rights, <br/> is not the responsibility of the original creators, contributors, or this fork’s maintainer.
-- You willingly agree to comply with this repository's [Terms of Use](https://github.com/codename0og/codename-rvc-fork-3/blob/main/TERMS_OF_USE.md)
+- You willingly agree to comply with this repository's [Terms of Use](https://github.com/codename0og/codename-rvc-fork-4/blob/main/TERMS_OF_USE.md)

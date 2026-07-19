@@ -486,7 +486,7 @@ def early_stopper(
                     vocoder=vocoder, 
                     architecture=architecture, 
                 )
-                print(f"[TRAINING] All finished .. You can ignore anything past this msg.")
+                print(f"[TRAINING] All finished .. You're good to go.")
         if n_gpus > 1:
             dist.barrier()
         return True

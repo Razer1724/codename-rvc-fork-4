@@ -25,6 +25,8 @@
         "mel_fmax": null
     },
     "model": {
+        "gen_istft_n_fft": 32,
+        "gen_istft_hop_size": 4,
         "inter_channels": 192,
         "hidden_channels": 192,
         "filter_channels": 768,

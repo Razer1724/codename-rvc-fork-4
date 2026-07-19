@@ -566,7 +566,7 @@ def run_train_script(
     custom_lr_g: float = 1e-4,
     custom_lr_d: float = 1e-4,
     use_2_sample_kl: bool = False,
-    use_best_step: bool = False,
+    use_best_step: bool = True,
     double_d_updates: bool = False,
 ):
     global training_process
@@ -1981,11 +1981,13 @@ def parse_arguments():
         type=str,
         help="Choose the vocoder architecture",
         choices=[
-            "hifi_refine", # NSF-HiFi-GAN and RefineGAN ~ They share the same base config
-            "ringformer",
+            "hifi",
+            "refine",
+            "ringformer_v1",
+            "ringformer_v2",
             "apex_gan",
         ],
-        default="hifi_refine",
+        default="hifi",
     )
     extract_parser.add_argument(
         "--embedder_model",
@@ -2032,20 +2034,20 @@ def parse_arguments():
         "--architecture",
         type=str,
         help="Choose the architecture. ( Only RVC is universal, others need their respective forks / frameworks.",
-        choices=["RVC", "Fork/Applio", "Fork"],
+        choices=["RVC", "Fork"],
         default="RVC",
     )  
     train_parser.add_argument(
         "--optimizer_choice_g",
         type=str,
-        choices=["AdamW", "AdaBelief", "RAdam", "DiffGrad", "Ranger21", "Sched-Free AdamW", "Sched-Free RAdam"],
+        choices=["AdamW", "AdaBelief", "RAdam", "Ranger21", "Sched-Free AdamW", "Sched-Free RAdam"],
         help="Choose an optimizer for Generator used in training.",
         default="AdamW",
     )
     train_parser.add_argument(
         "--optimizer_choice_d",
         type=str,
-        choices=["AdamW", "RAdam", "DiffGrad", "Ranger21", "AdaBelief"],
+        choices=["AdamW", "RAdam", "Ranger21", "AdaBelief"],
         help="Choose an optimizer for Discriminator used in training.",
         default="AdamW",
     )
@@ -2067,6 +2069,34 @@ def parse_arguments():
         type=float,
         help="Custom learning rate for discriminator.",
         default=1e-4,
+    )
+    train_parser.add_argument(
+        "--use_2_sample_kl",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="uses 2 samples to calculate KL Loss.",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--use_2_sample_kl",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="uses 2 samples to calculate KL Loss.",
+        default=False,
+    )
+    train_parser.add_argument(
+        "--use_best_step",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Tracks the step with lowest FM+Mel loss each epoch and uses those weights for eval preview and model extraction.",
+        default=True,
+    )
+    train_parser.add_argument(
+        "--double_d_updates",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Runs the discriminator backward/update step twice per batch. Gives D more gradient signal on small datasets.",
+        default=False,
     )
     train_parser.add_argument(
         "--epoch_save_frequency",
