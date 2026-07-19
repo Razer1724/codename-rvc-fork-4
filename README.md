@@ -72,11 +72,11 @@
  
 - Extras such as: Kl loss annealing, 2-sample KL loss calculation, Double-Update for Discriminator and more..
  
-- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, APEX-GAN.
-`( And potentially more in future ..)
+- Support for the following vocoders: HiFi-GAN-NSF, Refine-GAN, RingFormer, APEX-GAN.<br/>
+`( And potentially more in future ..)`
  
-- Support for many discriminator stacks: Avocodo's, mps/msd/mrd, mpd/sbd/mrd, hmddd and more..
-`( Naturally they require pretrained models. )
+- Support for many discriminator stacks: Avocodo's, mps/msd/mrd, mpd/sbd/mrd, hmddd and more..<br/>
+`( Naturally they require pretrained models. )`
  
 - Much better loss logging handling.<br/>
 `( Per-epoch-avg loss as the main one, rolling avg as the long-term one. )`
