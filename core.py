@@ -612,6 +612,7 @@ def run_train_script(
     use_spk_condense: bool = False,
     freeze_text_encoder: bool = False,
     freeze_emb_pitch: bool = False,
+    use_best_step: bool = False,
     
 ):
     global training_process
@@ -677,6 +678,7 @@ def run_train_script(
                 use_spk_condense,
                 freeze_text_encoder,
                 freeze_emb_pitch,
+                use_best_step,
             ],
         ),
     ]
@@ -1677,6 +1679,13 @@ def parse_arguments():
         default=False,
     )
     train_parser.add_argument(
+        "--use_best_step",
+        type=lambda x: bool(strtobool(x)),
+        choices=[True, False],
+        help="Track the best in-epoch generator step (by FM + Spectral loss) and use those weights for the eval-preview and exported/small weight model, instead of the last step of the epoch.",
+        default=False,
+    )
+    train_parser.add_argument(
         "--epoch_save_frequency",
         type=int,
         help="Save the model every specified number of epochs.",
@@ -2194,6 +2203,7 @@ def main():
                 freeze_gen=args.freeze_gen,
                 freeze_text_encoder=getattr(args, "freeze_text_encoder", False),
                 freeze_emb_pitch=getattr(args, "freeze_emb_pitch", False),
+                use_best_step=getattr(args, "use_best_step", False),
             )
         elif args.mode == "index":
             run_index_script(
