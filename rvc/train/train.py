@@ -135,6 +135,8 @@ use_spk_condense = bool(strtobool(sys.argv[41]))  # Speaker condensation: shrink
 freeze_text_encoder = bool(strtobool(sys.argv[42])) if len(sys.argv) > 42 else False # Freeze TextEncoder (enc_p) weights
 freeze_emb_pitch    = bool(strtobool(sys.argv[43])) if len(sys.argv) > 43 else False # Freeze emb_pitch embedding only
 
+use_best_step = bool(strtobool(sys.argv[44])) if len(sys.argv) > 44 else False # Track/keep the best in-epoch generator step (by FM + Spectral loss) for eval-preview and weight export
+
 if freeze_disc or freeze_gen or freeze_text_encoder or freeze_emb_pitch:
     parts = []
     if freeze_disc:         parts.append("Discriminator (disc)")
@@ -1108,7 +1110,13 @@ def training_loop(
         writer = writers[0]
 
     fn_hinge_loss = fn_hinge_loss if fn_hinge_loss is not None else None
-    
+
+    # Best in-epoch step tracking
+    if use_best_step:
+        best_loss_g = float('inf')
+        best_state_dict_g = None
+        live_sd_g = None
+
     train_loader.batch_sampler.set_epoch(epoch)
 
     net_g.train()
@@ -1344,6 +1352,14 @@ def training_loop(
                 grad_norm_g = torch.tensor(0.0)  # dummy for logging when frozen
                 skip_lr_sched = False
 
+            # Track best step in this epoch (FM + Spectral)
+            if use_best_step:
+                loss_val = loss_gen_total.detach() if from_scratch else (loss_fm + loss_mel).detach()
+                if loss_val < best_loss_g:
+                    best_loss_g = loss_val
+                    model_g_ref = net_g.module if hasattr(net_g, "module") else net_g
+                    best_state_dict_g = {k: v.detach().clone() for k, v in model_g_ref.state_dict().items()}
+
             # Per step exp lr decay for generator
             if not skip_lr_sched: # We skip lr scheduler step if there were nans / infs due to gradscaler's scaling.
                 if use_lr_scheduler and (not use_warmup or warmup_completed) and lr_scheduler == "exp decay step":
@@ -1554,9 +1570,20 @@ def training_loop(
                 if traj_img is not None:
                     writer.add_image("Training/Weight_Trajectory", traj_img, global_step, dataformats='HWC')
 
+            # Swap to best-step weights for eval_infer preview
+            if use_best_step and best_state_dict_g is not None:
+                model_g_ref = net_g.module if hasattr(net_g, "module") else net_g
+                live_sd_g = {k: v.detach().clone() for k, v in model_g_ref.state_dict().items()}
+                model_g_ref.load_state_dict(best_state_dict_g)
+
             # Inferencing on reference sample
             o = eval_infer(net_g, reference)
             audio_dict = {f"gen/audio_{epoch}e_{global_step}s": o[0, :, :]} # Eval-infer samples
+
+            # Restore live weights immediately ~ checkpoint saving stays raw
+            if use_best_step and live_sd_g is not None:
+                model_g_ref.load_state_dict(live_sd_g)
+                live_sd_g = None
 
             # Logging
             summarize(
@@ -1616,7 +1643,8 @@ def training_loop(
             done = True
 
         if model_add:
-            ckpt = (net_g.module.state_dict() if hasattr(net_g, "module") else net_g.state_dict())
+            model_g_ref = net_g.module if hasattr(net_g, "module") else net_g
+            ckpt = best_state_dict_g if (use_best_step and best_state_dict_g is not None) else model_g_ref.state_dict()
 
             for m in model_add:
                 if not os.path.exists(m):
