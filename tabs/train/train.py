@@ -302,7 +302,7 @@ SAVED_COMPONENT_KEYS = [
     'use_tstp', 'grad_clip_scheduling', 'grad_clip_steps_duration', 'grad_clip_value_g_cap',
     'grad_clip_value_d_cap', 'grad_clip_value_g_release', 'grad_clip_value_d_release',
     'index_algorithm', 'freeze_disc', 'freeze_gen', 'use_spk_condense',
-    'freeze_text_encoder', 'freeze_emb_pitch',
+    'freeze_text_encoder', 'freeze_emb_pitch', 'use_best_step',
 ]
 
 
@@ -407,6 +407,7 @@ def enforce_terms_and_save(
     use_spk_condense,
     freeze_text_encoder,
     freeze_emb_pitch,
+    use_best_step,
     # ── extra args captured only for config saving ──────────
     cpu_threads,
     extract_gpu,
@@ -497,6 +498,7 @@ def enforce_terms_and_save(
         'use_spk_condense':           use_spk_condense,
         'freeze_text_encoder':        freeze_text_encoder,
         'freeze_emb_pitch':           freeze_emb_pitch,
+        'use_best_step':              use_best_step,
     }
     save_training_config(model_name, config)
 
@@ -547,6 +549,7 @@ def enforce_terms_and_save(
         use_spk_condense,
         freeze_text_encoder,
         freeze_emb_pitch,
+        use_best_step,
     )
 
 
@@ -1222,6 +1225,20 @@ def train_tab():
                         key='use_spk_condense'
                     )
 
+                with gr.Accordion("Best In-Epoch Step", open=False):
+                    use_best_step = gr.Checkbox(
+                        label="Use Best-Step From Epoch",
+                        info=(
+                            "Tracks the generator step with the lowest Feature-Matching + Spectral loss "
+                            "within each epoch, and uses **those** weights — instead of the last step's "
+                            "weights — for the eval-preview audio and the exported/small weight model. "
+                            "The resumable G/D checkpoints are unaffected and always keep the live weights."
+                        ),
+                        value=False,
+                        interactive=True,
+                        key='use_best_step'
+                    )
+
                 index_algorithm = gr.Radio(
                     label="Index Algorithm",
                     info="KMeans is a clustering algorithm that divides the dataset into K clusters. This setting is particularly useful for large datasets.",
@@ -1304,6 +1321,7 @@ def train_tab():
                     use_spk_condense,
                     freeze_text_encoder,
                     freeze_emb_pitch,
+                    use_best_step,
                     # ── extra args captured for config saving only ──
                     cpu_threads,
                     extract_gpu,
@@ -1531,7 +1549,7 @@ def train_tab():
                 rolling_loss_steps, use_tstp, grad_clip_scheduling, grad_clip_steps_duration,
                 grad_clip_value_g_cap, grad_clip_value_d_cap, grad_clip_value_g_release,
                 grad_clip_value_d_release, index_algorithm, freeze_disc, freeze_gen,
-                use_spk_condense, freeze_text_encoder, freeze_emb_pitch
+                use_spk_condense, freeze_text_encoder, freeze_emb_pitch, use_best_step
             ])
 
             # ── Config auto-load when model is selected ───────────────────────
